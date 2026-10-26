@@ -1,8 +1,7 @@
 //! Phase 1.3: Command-Line Interface Argument Parser.
 //!
-//! Parses common linker flags (-o, -L, -l, -e, -shared, etc.) without any
-//! external packages. Operates on standard string slices for zero-allocation
-//! flexibility and easy testing.
+//! Parses linker flags (-o, -L, -l, -e, -shared, etc.) without external
+//! packages. Uses slices for fast parsing.
 
 const std = @import("std");
 
@@ -82,12 +81,11 @@ pub const ParseError = error{
 };
 
 /// Parse an array of command line argument strings into an `Options` struct.
-/// `raw_args` must include the process executable name at index 0.
 pub fn parse(allocator: std.mem.Allocator, raw_args: []const []const u8) ParseError!Options {
     var opts = Options{};
     errdefer opts.deinit(allocator);
 
-    var i: usize = 1; // Skip argv[0] (sibl binary itself)
+    var i: usize = 1; // Skip argv[0]
     while (i < raw_args.len) : (i += 1) {
         const arg = raw_args[i];
 
@@ -188,13 +186,13 @@ pub fn parse(allocator: std.mem.Allocator, raw_args: []const []const u8) ParseEr
             continue;
         }
 
-        // Any other dash option is unknown
+        // Unknown options
         if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print("sibl: unrecognized option '{s}'\n", .{arg});
             return error.UnknownOption;
         }
 
-        // Positional argument: input object file or archive
+        // Positional argument
         try opts.input_files.append(allocator, arg);
     }
 
@@ -225,6 +223,8 @@ pub fn printHelp() void {
     std.debug.print("{s}", .{help_msg});
 }
 
+// === Unit Tests ===
+
 test "parse combined short flags and positional inputs" {
     const testing = std.testing;
     const test_argv = [_][]const u8{
@@ -254,4 +254,121 @@ test "parse combined short flags and positional inputs" {
     try testing.expectEqual(@as(usize, 2), opts.input_files.items.len);
     try testing.expectEqualStrings("foo.o", opts.input_files.items[0]);
     try testing.expectEqualStrings("bar.o", opts.input_files.items[1]);
+}
+
+test "parse attached flags for -o -L and -l" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "-oapp.exe",
+        "-L/opt/lib",
+        "-lm",
+        "start.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("app.exe", opts.output_path);
+    try std.testing.expectEqual(@as(usize, 1), opts.lib_dirs.items.len);
+    try std.testing.expectEqualStrings("/opt/lib", opts.lib_dirs.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), opts.libs.items.len);
+    try std.testing.expectEqualStrings("m", opts.libs.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), opts.input_files.items.len);
+    try std.testing.expectEqualStrings("start.o", opts.input_files.items[0]);
+}
+
+test "double dash stops flag parsing and treats remaining as input files" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "-o",
+        "final.out",
+        "--",
+        "-not-a-flag.o",
+        "regular.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("final.out", opts.output_path);
+    try std.testing.expectEqual(@as(usize, 2), opts.input_files.items.len);
+    try std.testing.expectEqualStrings("-not-a-flag.o", opts.input_files.items[0]);
+    try std.testing.expectEqualStrings("regular.o", opts.input_files.items[1]);
+}
+
+test "parse --entry with equals sign" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "--entry=custom_kernel_entry",
+        "kernel.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("custom_kernel_entry", opts.entry_symbol);
+}
+
+test "parse static linking flags" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "-static",
+        "main.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expect(opts.is_static);
+}
+
+test "parse strip debug flag" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "-S",
+        "main.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expect(opts.strip_debug);
+    try std.testing.expect(!opts.strip_all);
+}
+
+test "error when flag value is missing" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "-o",
+    };
+
+    try std.testing.expectError(error.MissingValue, parse(std.testing.allocator, &test_argv));
+}
+
+test "error on unknown flag option" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "--non-existent-option",
+        "main.o",
+    };
+
+    try std.testing.expectError(error.UnknownOption, parse(std.testing.allocator, &test_argv));
+}
+
+test "error on invalid target format and invalid emulation" {
+    const bad_fmt_argv = [_][]const u8{
+        "sibl",
+        "--format",
+        "unknown_format",
+        "main.o",
+    };
+    try std.testing.expectError(error.InvalidFormat, parse(std.testing.allocator, &bad_fmt_argv));
+
+    const bad_emu_argv = [_][]const u8{
+        "sibl",
+        "-m",
+        "unknown_emulation",
+        "main.o",
+    };
+    try std.testing.expectError(error.InvalidEmulation, parse(std.testing.allocator, &bad_emu_argv));
 }

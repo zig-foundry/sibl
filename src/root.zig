@@ -1,12 +1,13 @@
 //! sibl - Something is Better Linker
 //!
 //! Root package library file.
-//! This file exposes the public API for sibl so other programs
-//! or internal files can use it as a package (`@import("sibl")`).
+//! Re-exports all core modules and data types.
 
 const std = @import("std");
 
+// ============================================================================
 // Core Modules
+// ============================================================================
 
 /// Memory allocation utilities and arena management (Phase 1.2).
 pub const alloc = @import("alloc.zig");
@@ -17,7 +18,12 @@ pub const args = @import("args.zig");
 /// Target architecture, format detection, and page rules (Phase 1.4).
 pub const target = @import("target.zig");
 
+/// Zero-copy memory mapped file reader (Phase 1.5).
+pub const file = @import("file.zig");
+
+// ============================================================================
 // Re-exported Common Types and Functions
+// ============================================================================
 
 // Allocator types
 pub const LinkerAllocators = alloc.LinkerAllocators;
@@ -36,12 +42,16 @@ pub const Arch = target.Arch;
 pub const BinaryFormat = target.BinaryFormat;
 pub const TargetInfo = target.TargetInfo;
 
-// Test Suite Runner
+// File reader types
+pub const MappedFile = file.MappedFile;
 
-// Running `zig build test` against root.zig will automatically run
-// all unit tests inside each sub-module.
+// ============================================================================
+// Test Suite Runner
+// ============================================================================
+
 test {
     _ = alloc;
     _ = args;
     _ = target;
+    _ = file;
 }

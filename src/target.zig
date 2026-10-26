@@ -1,7 +1,7 @@
 //! Phase 1.4: Target Detection for sibl.
 //!
-//! Identifies the target CPU architecture, binary container format,
-//! byte order, and virtual memory page alignment.
+//! Identifies target CPU architecture, binary container format,
+//! byte order, and page alignment.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,45 +23,34 @@ pub const Arch = enum {
     }
 };
 
-/// Supported binary object and executable formats.
+/// Supported binary formats.
 pub const BinaryFormat = enum {
     elf,
     coff,
     macho,
 };
 
-/// Target machine specification used across all linking stages.
+/// Target machine specification used across linking stages.
 pub const TargetInfo = struct {
-    /// Target CPU architecture
     arch: Arch,
-    /// Output file container format
     format: BinaryFormat,
-    /// Byte ordering (little-endian or big-endian)
     endian: std.builtin.Endian,
-    /// Virtual memory page alignment size in bytes
     page_size: usize,
-    /// Default program entry point symbol name
     default_entry: []const u8,
-    /// Default output binary filename
     default_output: []const u8,
 
-    /// Detect target machine settings from CLI options and host system fallbacks.
     pub fn detect(opts: args.Options) TargetInfo {
-        // 1. Check if user specified emulation via -m
         if (opts.emulation != .unspecified) {
             return fromEmulation(opts.emulation);
         }
 
-        // 2. Check if user explicitly passed --format
         if (opts.target_format != .auto) {
             return fromExplicitFormat(opts.target_format);
         }
 
-        // 3. Fall back to host system defaults
         return fromHost();
     }
 
-    /// Construct target configuration from standard GNU ld emulation strings.
     fn fromEmulation(emu: args.Emulation) TargetInfo {
         return switch (emu) {
             .elf_x86_64 => .{
@@ -108,7 +97,6 @@ pub const TargetInfo = struct {
         };
     }
 
-    /// Construct target configuration when only the format is provided.
     fn fromExplicitFormat(fmt: args.TargetFormat) TargetInfo {
         const host = fromHost();
         return switch (fmt) {
@@ -140,7 +128,6 @@ pub const TargetInfo = struct {
         };
     }
 
-    /// Read host machine architecture and OS using builtin reflection.
     fn fromHost() TargetInfo {
         const host_arch: Arch = switch (builtin.target.cpu.arch) {
             .x86_64 => .x86_64,
@@ -184,6 +171,8 @@ pub const TargetInfo = struct {
     }
 };
 
+// === Unit Tests ===
+
 test "target detection from emulation flag" {
     const opts = args.Options{
         .emulation = .elf_x86_64,
@@ -205,4 +194,46 @@ test "target detection for windows pe" {
     try std.testing.expectEqual(BinaryFormat.coff, target.format);
     try std.testing.expectEqualStrings("a.exe", target.default_output);
     try std.testing.expectEqualStrings("mainCRTStartup", target.default_entry);
+}
+
+test "pointer width returns correct size for 32-bit and 64-bit architectures" {
+    try std.testing.expectEqual(@as(u8, 64), Arch.x86_64.pointerWidth());
+    try std.testing.expectEqual(@as(u8, 64), Arch.aarch64.pointerWidth());
+    try std.testing.expectEqual(@as(u8, 64), Arch.riscv64.pointerWidth());
+    try std.testing.expectEqual(@as(u8, 32), Arch.x86.pointerWidth());
+    try std.testing.expectEqual(@as(u8, 32), Arch.arm.pointerWidth());
+}
+
+test "target detection for elf riscv64" {
+    const opts = args.Options{
+        .emulation = .elf_riscv64,
+    };
+    const target_info = TargetInfo.detect(opts);
+
+    try std.testing.expectEqual(Arch.riscv64, target_info.arch);
+    try std.testing.expectEqual(BinaryFormat.elf, target_info.format);
+    try std.testing.expectEqual(@as(usize, 4096), target_info.page_size);
+    try std.testing.expectEqualStrings("_start", target_info.default_entry);
+    try std.testing.expectEqualStrings("a.out", target_info.default_output);
+}
+
+test "target detection for elf aarch64" {
+    const opts = args.Options{
+        .emulation = .elf_aarch64,
+    };
+    const target_info = TargetInfo.detect(opts);
+
+    try std.testing.expectEqual(Arch.aarch64, target_info.arch);
+    try std.testing.expectEqual(BinaryFormat.elf, target_info.format);
+    try std.testing.expectEqual(@as(usize, 65536), target_info.page_size);
+}
+
+test "target detection for explicit macho format" {
+    const opts = args.Options{
+        .target_format = .macho,
+    };
+    const target_info = TargetInfo.detect(opts);
+
+    try std.testing.expectEqual(BinaryFormat.macho, target_info.format);
+    try std.testing.expectEqualStrings("_main", target_info.default_entry);
 }

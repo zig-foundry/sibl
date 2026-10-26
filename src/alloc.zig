@@ -45,12 +45,66 @@ pub const ScratchBuffer = struct {
     }
 };
 
+// === Unit Tests ===
+
 test "allocators initialization and arena bulk free" {
-    // Uses the test runner allocator so there are no dangling pointers or hangs
     var allocs = LinkerAllocators.init(std.testing.allocator);
     defer allocs.deinit();
 
     const a = allocs.arena();
     const slice = try a.alloc(u8, 1024);
     try std.testing.expectEqual(@as(usize, 1024), slice.len);
+}
+
+test "arena allocates multiple buffers in sequence" {
+    var allocs = LinkerAllocators.init(std.testing.allocator);
+    defer allocs.deinit();
+
+    const a = allocs.arena();
+    const buf1 = try a.alloc(u8, 64);
+    const buf2 = try a.alloc(u8, 128);
+    const buf3 = try a.alloc(u8, 256);
+
+    try std.testing.expectEqual(@as(usize, 64), buf1.len);
+    try std.testing.expectEqual(@as(usize, 128), buf2.len);
+    try std.testing.expectEqual(@as(usize, 256), buf3.len);
+}
+
+test "scratch buffer formats text within limit" {
+    var scratch = ScratchBuffer{};
+    var fba = scratch.fixedBufferAllocator();
+    const a = fba.allocator();
+
+    const msg = try std.fmt.allocPrint(a, "output_{s}_{d}.bin", .{ "test", 42 });
+    try std.testing.expectEqualStrings("output_test_42.bin", msg);
+}
+
+test "scratch buffer fails on overflow exceeding buffer size" {
+    var scratch = ScratchBuffer{};
+    var fba = scratch.fixedBufferAllocator();
+    const a = fba.allocator();
+
+    // 5000 bytes exceeds the 4096-byte fixed buffer size
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5000));
+}
+
+test "gpa allocator works for manual allocation and free" {
+    var allocs = LinkerAllocators.init(std.testing.allocator);
+    defer allocs.deinit();
+
+    const g = allocs.gpa();
+    const slice = try g.alloc(u32, 16);
+    defer g.free(slice);
+
+    slice[0] = 0xDEADBEEF;
+    try std.testing.expectEqual(@as(u32, 0xDEADBEEF), slice[0]);
+}
+
+test "arena handles zero-byte allocation cleanly" {
+    var allocs = LinkerAllocators.init(std.testing.allocator);
+    defer allocs.deinit();
+
+    const a = allocs.arena();
+    const zero = try a.alloc(u8, 0);
+    try std.testing.expectEqual(@as(usize, 0), zero.len);
 }
