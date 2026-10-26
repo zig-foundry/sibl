@@ -1,16 +1,11 @@
 //! sibl main entry point.
 //!
-//! Uses Zig 0.17 juicy main (`std.process.Init`) for pre-configured
-//! allocators and I/O interfaces.
+//! Uses Zig 0.17 juicy main (`std.process.Init`).
 
 const std = @import("std");
 const sibl = @import("sibl");
 
 pub fn main(init: std.process.Init) !void {
-    // In Zig 0.17, juicy main gives us pre-configured handles:
-    // - init.io: standard I/O interface
-    // - init.arena: permanent process arena allocator
-    // - init.gpa: thread-safe general purpose allocator with leak checks
     const io = init.io;
     const arena = init.arena.allocator();
 
@@ -65,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("  Entry Point   : {s}\n", .{final_entry});
     std.debug.print("  Shared Mode   : {}\n", .{options.is_shared});
 
-    // Phase 1.5: Read and memory-map all input files
+    // Phase 1.5 & Phase 2.1: Open, map, and inspect headers
     std.debug.print("  Input Files ({d}):\n", .{options.input_files.items.len});
     for (options.input_files.items) |file_path| {
         var mapped = sibl.MappedFile.open(io, file_path) catch |err| {
@@ -74,6 +69,23 @@ pub fn main(init: std.process.Init) !void {
         };
         defer mapped.deinit(io);
 
-        std.debug.print("    - {s} ({d} bytes mapped)\n", .{ file_path, mapped.size });
+        // If the file starts with ELF magic, parse and show its header info
+        if (mapped.data.len >= 4 and std.mem.eql(u8, mapped.data[0..4], &sibl.elf.MAGIC)) {
+            const elf_hdr = sibl.elf.Header.parse(mapped.data) catch |err| {
+                std.debug.print("sibl: error: failed to parse ELF header for '{s}': {s}\n", .{ file_path, @errorName(err) });
+                std.process.exit(1);
+            };
+
+            std.debug.print("    - {s} [ELF {s} {s} {s}] ({d} sections at 0x{x})\n", .{
+                file_path,
+                @tagName(elf_hdr.class),
+                @tagName(elf_hdr.machine),
+                @tagName(elf_hdr.file_type),
+                elf_hdr.shnum,
+                elf_hdr.shoff,
+            });
+        } else {
+            std.debug.print("    - {s} ({d} bytes mapped)\n", .{ file_path, mapped.size });
+        }
     }
 }

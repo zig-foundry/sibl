@@ -4,6 +4,7 @@ sibl/
 └── src/
     ├── alloc.zig
     ├── args.zig
+    ├── elf.zig
     ├── file.zig
     ├── main.zig
     ├── root.zig

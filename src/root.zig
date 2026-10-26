@@ -5,9 +5,7 @@
 
 const std = @import("std");
 
-// ============================================================================
-// Core Modules
-// ============================================================================
+// === Core Modules ===
 
 /// Memory allocation utilities and arena management (Phase 1.2).
 pub const alloc = @import("alloc.zig");
@@ -21,9 +19,10 @@ pub const target = @import("target.zig");
 /// Zero-copy memory mapped file reader (Phase 1.5).
 pub const file = @import("file.zig");
 
-// ============================================================================
-// Re-exported Common Types and Functions
-// ============================================================================
+/// ELF parsing and format inspection (Phase 2.1).
+pub const elf = @import("elf.zig");
+
+// === Re-exported Types and Functions ===
 
 // Allocator types
 pub const LinkerAllocators = alloc.LinkerAllocators;
@@ -45,13 +44,18 @@ pub const TargetInfo = target.TargetInfo;
 // File reader types
 pub const MappedFile = file.MappedFile;
 
-// ============================================================================
-// Test Suite Runner
-// ============================================================================
+// ELF types
+pub const ElfHeader = elf.Header;
+pub const ElfClass = elf.Class;
+pub const ElfMachine = elf.Machine;
+pub const ElfFileType = elf.FileType;
+
+// === Test Suite Runner ===
 
 test {
     _ = alloc;
     _ = args;
     _ = target;
     _ = file;
+    _ = elf;
 }
