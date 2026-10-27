@@ -125,29 +125,43 @@ pub fn main(init: std.process.Init) !void {
                 });
             }
 
-            // Phase 3.2: Parse sections
+            // Phase 3.2 & 3.5: Parse sections, flags, kinds, and dollar-sign grouping
             const strtab_bytes = coff_hdr.getStringTable(mapped.data);
             const coff_sections = coff_hdr.parseAllSectionHeaders(arena, mapped.data) catch continue;
 
             for (coff_sections, 0..) |csh, idx| {
                 const name = csh.getName(strtab_bytes) catch "<unnamed>";
                 const rel_count = csh.getRelocationCount(mapped.data) catch 0;
+                const kind = csh.getNormalizedKind(name);
+                const perm = csh.getPermissions();
+                const perm_str = perm.toChars();
+                const sort_key = sibl.CoffSectionHeader.getSortKey(name);
 
-                std.debug.print("      [{d:2}] {s:<24} raw_sz=0x{x:<6} virt_sz=0x{x:<6} align={d:<4} flags={s}{s}{s} relocs={d}\n", .{
-                    idx,
-                    name,
-                    csh.size_of_raw_data,
-                    csh.virtual_size,
-                    csh.getAlignment(),
-                    if (csh.isReadable()) "R" else "",
-                    if (csh.isWritable()) "W" else "",
-                    if (csh.isExecutable()) "X" else "",
-                    rel_count,
-                });
+                if (sort_key) |key| {
+                    const base = sibl.CoffSectionHeader.getBaseName(name);
+                    std.debug.print("      [{d:2}] {s:<18} -> group={s:<8} sort={s:<6} kind={s:<7} {s} relocs={d}\n", .{
+                        idx,
+                        name,
+                        base,
+                        key,
+                        kind.name(),
+                        perm_str,
+                        rel_count,
+                    });
+                } else {
+                    std.debug.print("      [{d:2}] {s:<24} kind={s:<7} perm={s} align={d:<4} relocs={d}\n", .{
+                        idx,
+                        name,
+                        kind.name(),
+                        perm_str,
+                        csh.getAlignment(),
+                        rel_count,
+                    });
+                }
 
                 // Phase 3.4: Display relocations belonging to this section
                 if (rel_count > 0) {
-                    const print_limit = @min(rel_count, 4);
+                    const print_limit = @min(rel_count, 3);
                     var r_idx: usize = 0;
                     while (r_idx < print_limit) : (r_idx += 1) {
                         const r = csh.parseRelocation(mapped.data, r_idx) catch continue;

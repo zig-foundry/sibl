@@ -25,7 +25,7 @@ pub const elf = @import("elf.zig");
 /// String table reader and deduplicating builder (Phase 2.4).
 pub const strtab = @import("strtab.zig");
 
-/// PE and COFF parsing for Windows targets (Phase 3.1 - 3.4).
+/// PE and COFF parsing for Windows targets (Phase 3.1 - 3.5).
 pub const coff = @import("coff.zig");
 
 // === Re-exported Types and Functions ===
@@ -86,6 +86,9 @@ pub const CoffStorageClass = coff.StorageClass;
 pub const CoffSpecialSection = coff.SpecialSection;
 pub const CoffRelocation = coff.Relocation;
 pub const CoffRelocationError = coff.RelocationError;
+pub const CoffComdatSelection = coff.ComdatSelection;
+pub const CoffSectionKind = coff.SectionKind;
+pub const CoffSectionPermissions = coff.SectionPermissions;
 pub const coff_characteristics = coff.characteristics;
 pub const coff_section_flags = coff.section_flags;
 

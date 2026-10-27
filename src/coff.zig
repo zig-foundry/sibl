@@ -1,7 +1,8 @@
-//! Phase 3.1 - 3.4: DOS, COFF Header, Sections, Symbols, and Relocations.
+//! Phase 3.1 - 3.5: DOS, COFF Header, Sections, Symbols, Relocations, and Flags.
 //!
 //! Provides zero-copy parsing for Windows PE executables (.exe, .dll)
-//! and raw COFF relocatable object files (.obj).
+//! and raw COFF relocatable object files (.obj), including cross-platform
+//! section normalization, dollar-sign grouping, and COMDAT rules.
 
 const std = @import("std");
 
@@ -80,7 +81,7 @@ pub const section_flags = struct {
     pub const MEM_16BIT: u32 = 0x00020000;
     pub const MEM_LOCKED: u32 = 0x00040000;
     pub const MEM_PRELOAD: u32 = 0x00080000;
-    pub const LNK_NRELOC_OVFL: u32 = 0x01000000; // Relocations overflowed 16 bits
+    pub const LNK_NRELOC_OVFL: u32 = 0x01000000;
     pub const MEM_DISCARDABLE: u32 = 0x02000000;
     pub const MEM_NOT_CACHED: u32 = 0x04000000;
     pub const MEM_NOT_PAGED: u32 = 0x08000000;
@@ -88,6 +89,69 @@ pub const section_flags = struct {
     pub const MEM_EXECUTE: u32 = 0x20000000;
     pub const MEM_READ: u32 = 0x40000000;
     pub const MEM_WRITE: u32 = 0x80000000;
+};
+
+/// COMDAT selection rules (IMAGE_COMDAT_SELECT_*).
+pub const ComdatSelection = enum(u8) {
+    no_duplicates = 1, // Linker emits an error if symbol is multiply defined
+    any = 2, // Arbitrarily pick one definition; discard all others
+    same_size = 3, // Pick any, but emit an error if byte sizes differ
+    exact_match = 4, // Pick any, but emit an error if bytes or checksums differ
+    associative = 5, // Tied to another leader section; kept only if leader is kept
+    largest = 6, // Pick the definition with the largest byte size
+    _,
+
+    pub fn name(self: ComdatSelection) []const u8 {
+        return switch (self) {
+            .no_duplicates => "NODUPLICATES",
+            .any => "ANY",
+            .same_size => "SAME_SIZE",
+            .exact_match => "EXACT_MATCH",
+            .associative => "ASSOCIATIVE",
+            .largest => "LARGEST",
+            _ => "UNKNOWN",
+        };
+    }
+};
+
+/// Normalized section semantic kind across ELF and PE/COFF.
+pub const SectionKind = enum {
+    text, // Executable machine instructions
+    rodata, // Read-only constants, string literals, and exception tables
+    data, // Initialized read-write global variables
+    bss, // Uninitialized zero-allocated memory
+    tls, // Thread-local storage template
+    debug, // DWARF / CodeView debug data
+    discard, // Temporary directives or discarded sections (.drectve)
+    metadata, // Non-allocatable linker comments or info (.comment)
+
+    pub fn name(self: SectionKind) []const u8 {
+        return switch (self) {
+            .text => "text",
+            .rodata => "rodata",
+            .data => "data",
+            .bss => "bss",
+            .tls => "tls",
+            .debug => "debug",
+            .discard => "discard",
+            .metadata => "metadata",
+        };
+    }
+};
+
+/// Section access permissions normalized for the memory loader.
+pub const SectionPermissions = struct {
+    read: bool,
+    write: bool,
+    execute: bool,
+
+    pub fn toChars(self: SectionPermissions) [3]u8 {
+        return .{
+            if (self.read) 'R' else '-',
+            if (self.write) 'W' else '-',
+            if (self.execute) 'X' else '-',
+        };
+    }
 };
 
 /// COFF symbol storage class identifiers (IMAGE_SYM_CLASS_*).
@@ -240,14 +304,10 @@ pub const OptionalHeader = struct {
 
 /// Normalized representation for a 10-byte COFF relocation record.
 pub const Relocation = struct {
-    /// Section offset where the relocation applies
     virtual_address: u32,
-    /// Zero-based index of target symbol in COFF symbol table
     symbol_table_index: u32,
-    /// Architecture-specific relocation type formula
     type_id: u16,
 
-    /// Return readable name for relocation types across supported CPU architectures.
     pub fn typeName(self: Relocation, machine: Machine) []const u8 {
         return switch (machine) {
             .x86_64 => switch (self.type_id) {
@@ -377,6 +437,10 @@ pub const SectionHeader = struct {
         return (self.characteristics & section_flags.LNK_COMDAT) != 0;
     }
 
+    pub fn isDiscardable(self: *const SectionHeader) bool {
+        return (self.characteristics & (section_flags.MEM_DISCARDABLE | section_flags.LNK_REMOVE)) != 0;
+    }
+
     pub fn hasRelocationOverflow(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.LNK_NRELOC_OVFL) != 0 and self.number_of_relocations == 0xFFFF;
     }
@@ -388,6 +452,59 @@ pub const SectionHeader = struct {
         return @as(u32, 1) << @intCast(align_val - 1);
     }
 
+    pub fn getPermissions(self: *const SectionHeader) SectionPermissions {
+        return .{
+            .read = self.isReadable(),
+            .write = self.isWritable(),
+            .execute = self.isExecutable(),
+        };
+    }
+
+    /// Classify the section into a normalized cross-platform semantic kind.
+    pub fn getNormalizedKind(self: *const SectionHeader, resolved_name: []const u8) SectionKind {
+        // Directives and explicitly removed sections
+        if ((self.characteristics & section_flags.LNK_REMOVE) != 0 or
+            std.mem.eql(u8, resolved_name, ".drectve"))
+        {
+            return .discard;
+        }
+
+        // Debug sections (.debug$S, .debug$T, etc.)
+        if (std.mem.startsWith(u8, resolved_name, ".debug") or
+            (self.characteristics & section_flags.MEM_DISCARDABLE) != 0)
+        {
+            return .debug;
+        }
+
+        // Thread-Local Storage (.tls, .tls$)
+        if (std.mem.startsWith(u8, resolved_name, ".tls")) {
+            return .tls;
+        }
+
+        // Linker info and comments
+        if ((self.characteristics & section_flags.LNK_INFO) != 0) {
+            return .metadata;
+        }
+
+        // Uninitialized data / BSS
+        if (self.hasUninitializedData() or std.mem.startsWith(u8, resolved_name, ".bss")) {
+            return .bss;
+        }
+
+        // Executable code (.text)
+        if (self.isExecutable() or self.hasCode()) {
+            return .text;
+        }
+
+        // Read-only vs. read-write data
+        if (self.isWritable()) {
+            return .data;
+        }
+
+        return .rodata;
+    }
+
+    /// Extract section name string, resolving long names from the COFF string table.
     pub fn getName(self: *const SectionHeader, strtab_bytes: []const u8) SectionError![]const u8 {
         if (self.raw_name[0] == '/') {
             const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
@@ -410,6 +527,24 @@ pub const SectionHeader = struct {
         return self.raw_name[0..len];
     }
 
+    /// Returns the base container section name under the COFF '$' grouping rule.
+    /// E.g. ".rdata$T" -> ".rdata", ".CRT$XCA" -> ".CRT", ".text" -> ".text".
+    pub fn getBaseName(resolved_name: []const u8) []const u8 {
+        if (std.mem.indexOfScalar(u8, resolved_name, '$')) |dollar_idx| {
+            return resolved_name[0..dollar_idx];
+        }
+        return resolved_name;
+    }
+
+    /// Returns the sort suffix under the COFF '$' rule, or null if no '$' exists.
+    /// E.g. ".rdata$T" -> "T", ".CRT$XCA" -> "XCA", ".text" -> null.
+    pub fn getSortKey(resolved_name: []const u8) ?[]const u8 {
+        if (std.mem.indexOfScalar(u8, resolved_name, '$')) |dollar_idx| {
+            return resolved_name[dollar_idx + 1 ..];
+        }
+        return null;
+    }
+
     pub fn getData(self: *const SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
         if (self.size_of_raw_data == 0) return &.{};
 
@@ -425,9 +560,6 @@ pub const SectionHeader = struct {
         return file_bytes[start..end];
     }
 
-    // --- Relocation Reader Methods ---
-
-    /// Retrieve the total number of relocations, handling 16-bit overflow records seamlessly.
     pub fn getRelocationCount(self: *const SectionHeader, file_bytes: []const u8) RelocationError!u32 {
         if (self.number_of_relocations == 0 and !self.hasRelocationOverflow()) return 0;
 
@@ -442,16 +574,13 @@ pub const SectionHeader = struct {
         return self.number_of_relocations;
     }
 
-    /// Parse a single 10-byte relocation entry by index.
     pub fn parseRelocation(self: *const SectionHeader, file_bytes: []const u8, index: usize) RelocationError!Relocation {
         const count = try self.getRelocationCount(file_bytes);
         if (index >= count) {
             return error.InvalidRelocationIndex;
         }
 
-        // If overflow occurred, entry 0 was the 32-bit count, so actual records start at index 1
         const entry_index: usize = if (self.hasRelocationOverflow()) index + 1 else index;
-
         const offset: usize = self.pointer_to_relocations + (entry_index * 10);
         const end: usize = offset + 10;
 
@@ -468,7 +597,6 @@ pub const SectionHeader = struct {
         };
     }
 
-    /// Parse all section relocations into an allocated slice.
     pub fn parseAllRelocations(
         self: *const SectionHeader,
         allocator: std.mem.Allocator,
@@ -1251,9 +1379,9 @@ test "parse 10-byte x86_64 COFF relocation entry" {
     var rel_buf: [10]u8 = undefined;
     @memset(&rel_buf, 0);
 
-    std.mem.writeInt(u32, rel_buf[0..4], 0x14, .little); // virtual_address (patch offset)
-    std.mem.writeInt(u32, rel_buf[4..8], 7, .little); // symbol_table_index (symbol #7)
-    std.mem.writeInt(u16, rel_buf[8..10], 0x0004, .little); // IMAGE_REL_AMD64_REL32
+    std.mem.writeInt(u32, rel_buf[0..4], 0x14, .little);
+    std.mem.writeInt(u32, rel_buf[4..8], 7, .little);
+    std.mem.writeInt(u16, rel_buf[8..10], 0x0004, .little);
 
     const sh = SectionHeader{
         .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
@@ -1284,7 +1412,7 @@ test "parse ARM64 COFF relocation entry" {
 
     std.mem.writeInt(u32, rel_buf[0..4], 0x40, .little);
     std.mem.writeInt(u32, rel_buf[4..8], 12, .little);
-    std.mem.writeInt(u16, rel_buf[8..10], 0x0003, .little); // IMAGE_REL_ARM64_BRANCH26
+    std.mem.writeInt(u16, rel_buf[8..10], 0x0003, .little);
 
     const sh = SectionHeader{
         .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
@@ -1306,21 +1434,16 @@ test "parse ARM64 COFF relocation entry" {
 }
 
 test "parse COFF relocation with overflow table (LNK_NRELOC_OVFL)" {
-    // When count overflows 16 bits, number_of_relocations = 0xFFFF and LNK_NRELOC_OVFL is set.
-    // First 10 bytes store the actual 32-bit count (e.g. 70,000) in VirtualAddress.
-    // The next 10 bytes are the first real relocation entry.
     var file_buf: [20]u8 = undefined;
     @memset(&file_buf, 0);
 
-    // Entry 0: Overflow record holding count = 2
-    std.mem.writeInt(u32, file_buf[0..4], 1, .little); // Actual count: 1 relocation follows
+    std.mem.writeInt(u32, file_buf[0..4], 1, .little);
     std.mem.writeInt(u32, file_buf[4..8], 0, .little);
     std.mem.writeInt(u16, file_buf[8..10], 0, .little);
 
-    // Entry 1: Actual relocation
-    std.mem.writeInt(u32, file_buf[10..14], 0x100, .little); // virtual_address = 0x100
-    std.mem.writeInt(u32, file_buf[14..18], 5, .little); // symbol #5
-    std.mem.writeInt(u16, file_buf[18..20], 0x0001, .little); // ADDR64
+    std.mem.writeInt(u32, file_buf[10..14], 0x100, .little);
+    std.mem.writeInt(u32, file_buf[14..18], 5, .little);
+    std.mem.writeInt(u16, file_buf[18..20], 0x0001, .little);
 
     const sh = SectionHeader{
         .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
@@ -1342,4 +1465,113 @@ test "parse COFF relocation with overflow table (LNK_NRELOC_OVFL)" {
     try std.testing.expectEqual(@as(u32, 0x100), rel.virtual_address);
     try std.testing.expectEqual(@as(u32, 5), rel.symbol_table_index);
     try std.testing.expectEqualStrings("ADDR64", rel.typeName(.x86_64));
+}
+
+test "COFF dollar sign section name splitting" {
+    // Normal section
+    try std.testing.expectEqualStrings(".text", SectionHeader.getBaseName(".text"));
+    try std.testing.expect(SectionHeader.getSortKey(".text") == null);
+
+    // Grouped section with sort suffix
+    try std.testing.expectEqualStrings(".rdata", SectionHeader.getBaseName(".rdata$T"));
+    try std.testing.expectEqualStrings("T", SectionHeader.getSortKey(".rdata$T").?);
+
+    try std.testing.expectEqualStrings(".CRT", SectionHeader.getBaseName(".CRT$XLA"));
+    try std.testing.expectEqualStrings("XLA", SectionHeader.getSortKey(".CRT$XLA").?);
+
+    try std.testing.expectEqualStrings(".tls", SectionHeader.getBaseName(".tls$ZZZ"));
+    try std.testing.expectEqualStrings("ZZZ", SectionHeader.getSortKey(".tls$ZZZ").?);
+}
+
+test "COFF normalized section kind and permissions" {
+    // 1. .text (Code, Read + Execute)
+    const text_sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 100,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_CODE | section_flags.MEM_READ | section_flags.MEM_EXECUTE,
+    };
+    try std.testing.expectEqual(SectionKind.text, text_sh.getNormalizedKind(".text"));
+    const text_perm = text_sh.getPermissions();
+    try std.testing.expect(text_perm.read and !text_perm.write and text_perm.execute);
+    try std.testing.expectEqualStrings("R-X", &text_perm.toChars());
+
+    // 2. .data (Initialized, Read + Write)
+    const data_sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 'd', 'a', 't', 'a', 0, 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 100,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ | section_flags.MEM_WRITE,
+    };
+    try std.testing.expectEqual(SectionKind.data, data_sh.getNormalizedKind(".data"));
+    const data_perm = data_sh.getPermissions();
+    try std.testing.expect(data_perm.read and data_perm.write and !data_perm.execute);
+
+    // 3. .rdata (Initialized, Read-Only)
+    const rdata_sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 'r', 'd', 'a', 't', 'a', 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 100,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ,
+    };
+    try std.testing.expectEqual(SectionKind.rodata, rdata_sh.getNormalizedKind(".rdata"));
+
+    // 4. .debug$S (Discardable Debug Data)
+    const debug_sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 'd', 'e', 'b', 'u', 'g', '$', 'S' },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 100,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.MEM_READ | section_flags.MEM_DISCARDABLE,
+    };
+    try std.testing.expectEqual(SectionKind.debug, debug_sh.getNormalizedKind(".debug$S"));
+
+    // 5. Directives (.drectve) -> Discard
+    const drectve_sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 'd', 'r', 'e', 'c', 't', 'v', 'e' },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 50,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.LNK_INFO | section_flags.LNK_REMOVE,
+    };
+    try std.testing.expectEqual(SectionKind.discard, drectve_sh.getNormalizedKind(".drectve"));
+}
+
+test "COMDAT selection name mappings" {
+    const sel_any: ComdatSelection = .any;
+    try std.testing.expectEqualStrings("ANY", sel_any.name());
+
+    const sel_exact: ComdatSelection = .exact_match;
+    try std.testing.expectEqualStrings("EXACT_MATCH", sel_exact.name());
+
+    const sel_largest: ComdatSelection = .largest;
+    try std.testing.expectEqualStrings("LARGEST", sel_largest.name());
 }
