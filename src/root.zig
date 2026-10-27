@@ -22,6 +22,9 @@ pub const file = @import("file.zig");
 /// ELF parsing and format inspection (Phase 2.1, 2.2, & 2.3).
 pub const elf = @import("elf.zig");
 
+/// String table reader and deduplicating builder (Phase 2.4).
+pub const strtab = @import("strtab.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -60,6 +63,10 @@ pub const ElfSymbolType = elf.SymbolType;
 pub const ElfSymbolVisibility = elf.SymbolVisibility;
 pub const SpecialSectionIndex = elf.SpecialSectionIndex;
 
+// String table types
+pub const StringTableReader = strtab.StringTableReader;
+pub const StringTableBuilder = strtab.StringTableBuilder;
+
 // === Test Suite Runner ===
 
 test {
@@ -68,4 +75,5 @@ test {
     _ = target;
     _ = file;
     _ = elf;
+    _ = strtab;
 }

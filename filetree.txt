@@ -8,4 +8,5 @@ sibl/
     ├── file.zig
     ├── main.zig
     ├── root.zig
+    ├── strtab.zig
     └── target.zig
