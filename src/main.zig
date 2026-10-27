@@ -170,6 +170,90 @@ pub fn main(init: std.process.Init) !void {
                 macho_hdr.sizeofcmds,
                 macho_hdr.isPie(),
             });
+
+            // Phase 4.2: Decode and print load commands
+            if (macho_hdr.loadCommands(mapped.data)) |mut_iter| {
+                var iter = mut_iter;
+                var cmd_idx: usize = 0;
+                while (iter.next() catch null) |lc| : (cmd_idx += 1) {
+                    switch (lc.cmd) {
+                        .segment_64 => {
+                            if (lc.asSegment64(macho_hdr.endian)) |seg| {
+                                std.debug.print("      [{d:2}] {s:<18} segname={s:<14} vmaddr=0x{x:<9} vmsz=0x{x:<7} nsects={d}\n", .{
+                                    cmd_idx,
+                                    lc.cmd.name(),
+                                    seg.getName(),
+                                    seg.vmaddr,
+                                    seg.vmsize,
+                                    seg.nsects,
+                                });
+                            } else |_| {}
+                        },
+                        .symtab => {
+                            if (lc.asSymtab(macho_hdr.endian)) |sym| {
+                                std.debug.print("      [{d:2}] {s:<18} symoff=0x{x:<8} nsyms={d:<6} stroff=0x{x:<8} strsz=0x{x}\n", .{
+                                    cmd_idx,
+                                    lc.cmd.name(),
+                                    sym.symoff,
+                                    sym.nsyms,
+                                    sym.stroff,
+                                    sym.strsize,
+                                });
+                            } else |_| {}
+                        },
+                        .dysymtab => {
+                            if (lc.asDysymtab(macho_hdr.endian)) |dysym| {
+                                std.debug.print("      [{d:2}] {s:<18} locals={d} extdef={d} undef={d} indirect={d}\n", .{
+                                    cmd_idx,
+                                    lc.cmd.name(),
+                                    dysym.nlocalsym,
+                                    dysym.nextdefsym,
+                                    dysym.nundefsym,
+                                    dysym.nindirectsyms,
+                                });
+                            } else |_| {}
+                        },
+                        .main => {
+                            if (lc.asMain(macho_hdr.endian)) |m| {
+                                std.debug.print("      [{d:2}] {s:<18} entryoff=0x{x} stacksize=0x{x}\n", .{
+                                    cmd_idx,
+                                    lc.cmd.name(),
+                                    m.entryoff,
+                                    m.stacksize,
+                                });
+                            } else |_| {}
+                        },
+                        .load_dylib, .load_weak_dylib, .id_dylib => {
+                            if (lc.asDylib(macho_hdr.endian)) |dyl| {
+                                const dyl_name = dyl.getName() orelse "<unknown>";
+                                std.debug.print("      [{d:2}] {s:<18} dylib={s}\n", .{
+                                    cmd_idx,
+                                    lc.cmd.name(),
+                                    dyl_name,
+                                });
+                            } else |_| {}
+                        },
+                        .build_version => {
+                            if (lc.asBuildVersion(macho_hdr.endian)) |bv| {
+                                std.debug.print("      [{d:2}] {s:<18} platform={s} minos=0x{x} sdk=0x{x}\n", .{
+                                    cmd_idx,
+                                    lc.cmd.name(),
+                                    bv.platformName(),
+                                    bv.minos,
+                                    bv.sdk,
+                                });
+                            } else |_| {}
+                        },
+                        else => {
+                            std.debug.print("      [{d:2}] {s:<18} size={d} bytes\n", .{
+                                cmd_idx,
+                                lc.cmd.name(),
+                                lc.cmdsize,
+                            });
+                        },
+                    }
+                }
+            } else |_| {}
         } else {
             std.debug.print("    - {s} ({d} bytes mapped, non-binary/unknown)\n", .{ file_path, mapped.size });
         }
