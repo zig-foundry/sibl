@@ -25,7 +25,7 @@ pub const elf = @import("elf.zig");
 /// String table reader and deduplicating builder (Phase 2.4).
 pub const strtab = @import("strtab.zig");
 
-/// PE and COFF parsing for Windows targets (Phase 3.1 - 3.3).
+/// PE and COFF parsing for Windows targets (Phase 3.1 - 3.4).
 pub const coff = @import("coff.zig");
 
 // === Re-exported Types and Functions ===
@@ -59,14 +59,14 @@ pub const ElfSectionHeader = elf.SectionHeader;
 pub const ElfSectionType = elf.SectionType;
 pub const elf_flags = elf.flags;
 
-// Symbol types
+// ELF Symbol types
 pub const ElfSymbol = elf.Symbol;
 pub const ElfSymbolBinding = elf.SymbolBinding;
 pub const ElfSymbolType = elf.SymbolType;
 pub const ElfSymbolVisibility = elf.SymbolVisibility;
 pub const SpecialSectionIndex = elf.SpecialSectionIndex;
 
-// Relocation types
+// ELF Relocation types
 pub const ElfRelocation = elf.Relocation;
 pub const RelocationError = elf.RelocationError;
 
@@ -84,6 +84,8 @@ pub const CoffSectionHeader = coff.SectionHeader;
 pub const CoffSymbol = coff.Symbol;
 pub const CoffStorageClass = coff.StorageClass;
 pub const CoffSpecialSection = coff.SpecialSection;
+pub const CoffRelocation = coff.Relocation;
+pub const CoffRelocationError = coff.RelocationError;
 pub const coff_characteristics = coff.characteristics;
 pub const coff_section_flags = coff.section_flags;
 

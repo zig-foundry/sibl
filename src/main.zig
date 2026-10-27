@@ -125,13 +125,15 @@ pub fn main(init: std.process.Init) !void {
                 });
             }
 
-            // Phase 3.2: Parse and print sections
+            // Phase 3.2: Parse sections
             const strtab_bytes = coff_hdr.getStringTable(mapped.data);
             const coff_sections = coff_hdr.parseAllSectionHeaders(arena, mapped.data) catch continue;
 
             for (coff_sections, 0..) |csh, idx| {
                 const name = csh.getName(strtab_bytes) catch "<unnamed>";
-                std.debug.print("      [{d:2}] {s:<24} raw_sz=0x{x:<6} virt_sz=0x{x:<6} align={d:<4} flags={s}{s}{s}\n", .{
+                const rel_count = csh.getRelocationCount(mapped.data) catch 0;
+
+                std.debug.print("      [{d:2}] {s:<24} raw_sz=0x{x:<6} virt_sz=0x{x:<6} align={d:<4} flags={s}{s}{s} relocs={d}\n", .{
                     idx,
                     name,
                     csh.size_of_raw_data,
@@ -140,13 +142,41 @@ pub fn main(init: std.process.Init) !void {
                     if (csh.isReadable()) "R" else "",
                     if (csh.isWritable()) "W" else "",
                     if (csh.isExecutable()) "X" else "",
+                    rel_count,
                 });
+
+                // Phase 3.4: Display relocations belonging to this section
+                if (rel_count > 0) {
+                    const print_limit = @min(rel_count, 4);
+                    var r_idx: usize = 0;
+                    while (r_idx < print_limit) : (r_idx += 1) {
+                        const r = csh.parseRelocation(mapped.data, r_idx) catch continue;
+                        var sym_name: []const u8 = "<none>";
+                        if (r.symbol_table_index < coff_hdr.symbol_count) {
+                            if (coff_hdr.parseSymbol(mapped.data, r.symbol_table_index)) |sym| {
+                                sym_name = sym.getName(strtab_bytes) catch "<unnamed>";
+                            } else |_| {}
+                        }
+
+                        std.debug.print("          -> ({d:2}) off=0x{x:<8} type={s:<16} sym=[{d:4}] {s:<20}\n", .{
+                            r_idx,
+                            r.virtual_address,
+                            r.typeName(coff_hdr.machine),
+                            r.symbol_table_index,
+                            if (sym_name.len == 0) "<empty>" else sym_name,
+                        });
+                    }
+
+                    if (rel_count > print_limit) {
+                        std.debug.print("          -> ... and {d} more relocations\n", .{rel_count - print_limit});
+                    }
+                }
             }
 
-            // Phase 3.3: Parse and print symbols
+            // Phase 3.3: Symbols
             if (coff_hdr.symbol_count > 0) {
                 std.debug.print("          -> COFF Symbol Table: {d} symbols:\n", .{coff_hdr.symbol_count});
-                const print_limit = @min(coff_hdr.symbol_count, 8);
+                const print_limit = @min(coff_hdr.symbol_count, 6);
                 var sym_idx: usize = 0;
                 while (sym_idx < print_limit) {
                     const sym = coff_hdr.parseSymbol(mapped.data, sym_idx) catch break;
@@ -161,7 +191,6 @@ pub fn main(init: std.process.Init) !void {
                         sym.num_aux_symbols,
                     });
 
-                    // Advance index past any auxiliary records
                     sym_idx += 1 + @as(usize, sym.num_aux_symbols);
                 }
 

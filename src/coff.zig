@@ -1,4 +1,4 @@
-//! Phase 3.1, 3.2, & 3.3: DOS, COFF Header, Sections, and Symbol Table Parser.
+//! Phase 3.1 - 3.4: DOS, COFF Header, Sections, Symbols, and Relocations.
 //!
 //! Provides zero-copy parsing for Windows PE executables (.exe, .dll)
 //! and raw COFF relocatable object files (.obj).
@@ -80,7 +80,7 @@ pub const section_flags = struct {
     pub const MEM_16BIT: u32 = 0x00020000;
     pub const MEM_LOCKED: u32 = 0x00040000;
     pub const MEM_PRELOAD: u32 = 0x00080000;
-    pub const LNK_NRELOC_OVFL: u32 = 0x01000000;
+    pub const LNK_NRELOC_OVFL: u32 = 0x01000000; // Relocations overflowed 16 bits
     pub const MEM_DISCARDABLE: u32 = 0x02000000;
     pub const MEM_NOT_CACHED: u32 = 0x04000000;
     pub const MEM_NOT_PAGED: u32 = 0x08000000;
@@ -111,10 +111,10 @@ pub const StorageClass = enum(u8) {
     member_of_enum = 16,
     register_param = 17,
     bit_field = 18,
-    block = 100, // .bb or .eb
-    function = 101, // .bf or .ef
+    block = 100,
+    function = 101,
     end_of_struct = 102,
-    file = 103, // .file
+    file = 103,
     section = 104,
     weak_external = 105,
     clr_token = 107,
@@ -157,9 +157,9 @@ pub const StorageClass = enum(u8) {
 
 /// Special section numbers in COFF symbol table.
 pub const SpecialSection = struct {
-    pub const UNDEFINED: i16 = 0; // External undefined or common symbol
-    pub const ABSOLUTE: i16 = -1; // Absolute symbol constant
-    pub const DEBUG: i16 = -2; // Debug info symbol
+    pub const UNDEFINED: i16 = 0;
+    pub const ABSOLUTE: i16 = -1;
+    pub const DEBUG: i16 = -2;
 };
 
 /// Windows Subsystem types.
@@ -236,6 +236,74 @@ pub const OptionalHeader = struct {
     data_directories: [16]DataDirectory,
 };
 
+// === Relocation Representation ===
+
+/// Normalized representation for a 10-byte COFF relocation record.
+pub const Relocation = struct {
+    /// Section offset where the relocation applies
+    virtual_address: u32,
+    /// Zero-based index of target symbol in COFF symbol table
+    symbol_table_index: u32,
+    /// Architecture-specific relocation type formula
+    type_id: u16,
+
+    /// Return readable name for relocation types across supported CPU architectures.
+    pub fn typeName(self: Relocation, machine: Machine) []const u8 {
+        return switch (machine) {
+            .x86_64 => switch (self.type_id) {
+                0x0000 => "ABSOLUTE",
+                0x0001 => "ADDR64",
+                0x0002 => "ADDR32",
+                0x0003 => "ADDR32NB",
+                0x0004 => "REL32",
+                0x0005 => "REL32_1",
+                0x0006 => "REL32_2",
+                0x0007 => "REL32_3",
+                0x0008 => "REL32_4",
+                0x0009 => "REL32_5",
+                0x000A => "SECTION",
+                0x000B => "SECREL",
+                0x000C => "SECREL7",
+                0x000D => "TOKEN",
+                0x000E => "PCRQUAD",
+                else => "AMD64_RELOC",
+            },
+            .arm64 => switch (self.type_id) {
+                0x0000 => "ABSOLUTE",
+                0x0001 => "ADDR32",
+                0x0002 => "ADDR32NB",
+                0x0003 => "BRANCH26",
+                0x0004 => "PAGEBASE_REL21",
+                0x0005 => "REL21",
+                0x0006 => "PAGEOFFSET_12A",
+                0x0007 => "PAGEOFFSET_12L",
+                0x0008 => "SECREL",
+                0x0009 => "SECREL_LOW12A",
+                0x000A => "SECREL_HIGH12A",
+                0x000B => "SECREL_LOW12L",
+                0x000C => "TOKEN",
+                0x000D => "SECTION",
+                0x000E => "ADDR64",
+                0x000F => "BRANCH19",
+                else => "ARM64_RELOC",
+            },
+            .i386 => switch (self.type_id) {
+                0x0000 => "ABSOLUTE",
+                0x0001 => "DIR16",
+                0x0002 => "REL16",
+                0x0006 => "DIR32",
+                0x0007 => "DIR32NB",
+                0x0009 => "SEG12",
+                0x000A => "SECTION",
+                0x000B => "SECREL",
+                0x0014 => "REL32",
+                else => "I386_RELOC",
+            },
+            else => "RELOC",
+        };
+    }
+};
+
 // === Error Sets ===
 
 pub const Error = error{
@@ -261,6 +329,11 @@ pub const SymbolError = error{
     StringTableOutOfBounds,
 };
 
+pub const RelocationError = error{
+    TruncatedRelocationTable,
+    InvalidRelocationIndex,
+};
+
 // === Section Header Representation ===
 
 /// Normalized representation for a 40-byte COFF / PE section header.
@@ -276,35 +349,39 @@ pub const SectionHeader = struct {
     number_of_linenumbers: u16,
     characteristics: u32,
 
-    pub fn isExecutable(self: SectionHeader) bool {
+    pub fn isExecutable(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_EXECUTE) != 0;
     }
 
-    pub fn isReadable(self: SectionHeader) bool {
+    pub fn isReadable(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_READ) != 0;
     }
 
-    pub fn isWritable(self: SectionHeader) bool {
+    pub fn isWritable(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_WRITE) != 0;
     }
 
-    pub fn hasCode(self: SectionHeader) bool {
+    pub fn hasCode(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_CODE) != 0;
     }
 
-    pub fn hasInitializedData(self: SectionHeader) bool {
+    pub fn hasInitializedData(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_INITIALIZED_DATA) != 0;
     }
 
-    pub fn hasUninitializedData(self: SectionHeader) bool {
+    pub fn hasUninitializedData(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_UNINITIALIZED_DATA) != 0;
     }
 
-    pub fn isComdat(self: SectionHeader) bool {
+    pub fn isComdat(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.LNK_COMDAT) != 0;
     }
 
-    pub fn getAlignment(self: SectionHeader) u32 {
+    pub fn hasRelocationOverflow(self: *const SectionHeader) bool {
+        return (self.characteristics & section_flags.LNK_NRELOC_OVFL) != 0 and self.number_of_relocations == 0xFFFF;
+    }
+
+    pub fn getAlignment(self: *const SectionHeader) u32 {
         const align_val = (self.characteristics >> 20) & 0x0F;
         if (align_val == 0) return 16;
         if (align_val > 14) return 8192;
@@ -333,7 +410,7 @@ pub const SectionHeader = struct {
         return self.raw_name[0..len];
     }
 
-    pub fn getData(self: SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
+    pub fn getData(self: *const SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
         if (self.size_of_raw_data == 0) return &.{};
 
         const start: usize = self.pointer_to_raw_data;
@@ -347,59 +424,105 @@ pub const SectionHeader = struct {
 
         return file_bytes[start..end];
     }
+
+    // --- Relocation Reader Methods ---
+
+    /// Retrieve the total number of relocations, handling 16-bit overflow records seamlessly.
+    pub fn getRelocationCount(self: *const SectionHeader, file_bytes: []const u8) RelocationError!u32 {
+        if (self.number_of_relocations == 0 and !self.hasRelocationOverflow()) return 0;
+
+        if (self.hasRelocationOverflow()) {
+            const start: usize = self.pointer_to_relocations;
+            if (start + 10 > file_bytes.len) {
+                return error.TruncatedRelocationTable;
+            }
+            return std.mem.readInt(u32, file_bytes[start..][0..4], .little);
+        }
+
+        return self.number_of_relocations;
+    }
+
+    /// Parse a single 10-byte relocation entry by index.
+    pub fn parseRelocation(self: *const SectionHeader, file_bytes: []const u8, index: usize) RelocationError!Relocation {
+        const count = try self.getRelocationCount(file_bytes);
+        if (index >= count) {
+            return error.InvalidRelocationIndex;
+        }
+
+        // If overflow occurred, entry 0 was the 32-bit count, so actual records start at index 1
+        const entry_index: usize = if (self.hasRelocationOverflow()) index + 1 else index;
+
+        const offset: usize = self.pointer_to_relocations + (entry_index * 10);
+        const end: usize = offset + 10;
+
+        if (end > file_bytes.len) {
+            return error.TruncatedRelocationTable;
+        }
+
+        const rel_bytes = file_bytes[offset..end];
+
+        return .{
+            .virtual_address = std.mem.readInt(u32, rel_bytes[0..][0..4], .little),
+            .symbol_table_index = std.mem.readInt(u32, rel_bytes[4..][0..4], .little),
+            .type_id = std.mem.readInt(u16, rel_bytes[8..][0..2], .little),
+        };
+    }
+
+    /// Parse all section relocations into an allocated slice.
+    pub fn parseAllRelocations(
+        self: *const SectionHeader,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+    ) (RelocationError || std.mem.Allocator.Error)![]Relocation {
+        const count = try self.getRelocationCount(file_bytes);
+        const relocs = try allocator.alloc(Relocation, count);
+        errdefer allocator.free(relocs);
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            relocs[i] = try self.parseRelocation(file_bytes, i);
+        }
+
+        return relocs;
+    }
 };
 
 // === Symbol Table Representation ===
 
 /// Normalized representation for an 18-byte COFF symbol entry.
 pub const Symbol = struct {
-    /// Raw 8-byte name buffer (either inline ASCII or [0,0,0,0, offset])
     raw_name: [8]u8,
-    /// Value of symbol (section offset, constant value, or common size)
     value: u32,
-    /// 1-based section index, or SpecialSection (0 = UNDEF/COMMON, -1 = ABS, -2 = DEBUG)
     section_number: i16,
-    /// Type field (MSB = derived type, LSB = base type, e.g. 0x20 = function)
     sym_type: u16,
-    /// Storage class defining symbol visibility and binding
     storage_class: StorageClass,
-    /// Number of auxiliary 18-byte symbol records following this one
     num_aux_symbols: u8,
 
-    /// Returns true if this is an undefined external symbol that needs to be linked.
-    pub fn isUndefined(self: Symbol) bool {
+    pub fn isUndefined(self: *const Symbol) bool {
         return self.section_number == SpecialSection.UNDEFINED and self.value == 0;
     }
 
-    /// Returns true if this is a COMMON symbol (uninitialized variable with size in value).
-    pub fn isCommon(self: Symbol) bool {
+    pub fn isCommon(self: *const Symbol) bool {
         return self.section_number == SpecialSection.UNDEFINED and self.value > 0;
     }
 
-    /// Returns true if this symbol has an absolute constant value.
-    pub fn isAbsolute(self: Symbol) bool {
+    pub fn isAbsolute(self: *const Symbol) bool {
         return self.section_number == SpecialSection.ABSOLUTE;
     }
 
-    /// Returns true if this symbol is globally visible across object files.
-    pub fn isExternal(self: Symbol) bool {
+    pub fn isExternal(self: *const Symbol) bool {
         return self.storage_class == .external;
     }
 
-    /// Returns true if this symbol is private to this object file.
-    pub fn isStatic(self: Symbol) bool {
+    pub fn isStatic(self: *const Symbol) bool {
         return self.storage_class == .static;
     }
 
-    /// Returns true if this symbol represents an executable function.
-    pub fn isFunction(self: Symbol) bool {
+    pub fn isFunction(self: *const Symbol) bool {
         return (self.sym_type & 0x20) != 0 or self.storage_class == .function;
     }
 
-    /// Extract symbol name string, resolving long names from the COFF string table.
     pub fn getName(self: *const Symbol, strtab_bytes: []const u8) SymbolError![]const u8 {
-
-        // If first 4 bytes are 0, the next 4 bytes are an offset into the string table
         const zeroes = std.mem.readInt(u32, self.raw_name[0..4], .little);
         if (zeroes == 0) {
             const offset = std.mem.readInt(u32, self.raw_name[4..8], .little);
@@ -412,7 +535,6 @@ pub const Symbol = struct {
             return slice[0..len];
         }
 
-        // Inline short name (up to 8 bytes, null-padded)
         const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
         return self.raw_name[0..len];
     }
@@ -526,7 +648,6 @@ pub const Header = struct {
         return file_bytes[strtab_offset .. strtab_offset + strtab_size];
     }
 
-    /// Parse a single 18-byte symbol entry by its index.
     pub fn parseSymbol(self: Header, file_bytes: []const u8, index: usize) SymbolError!Symbol {
         if (index >= self.symbol_count) {
             return error.InvalidSymbolIndex;
@@ -553,7 +674,6 @@ pub const Header = struct {
         };
     }
 
-    /// Parse all symbol table entries into an allocated slice.
     pub fn parseAllSymbols(
         self: Header,
         allocator: std.mem.Allocator,
@@ -1035,11 +1155,11 @@ test "parse 18-byte inline COFF symbol entry" {
     @memset(&sym_buf, 0);
 
     @memcpy(sym_buf[0..5], "_main");
-    std.mem.writeInt(u32, sym_buf[8..12], 0x10, .little); // Value: 0x10
-    std.mem.writeInt(i16, sym_buf[12..14], 1, .little); // Section 1 (.text)
-    std.mem.writeInt(u16, sym_buf[14..16], 0x20, .little); // Type: Function (0x20)
-    sym_buf[16] = 2; // StorageClass: External (2)
-    sym_buf[17] = 0; // Aux symbols: 0
+    std.mem.writeInt(u32, sym_buf[8..12], 0x10, .little);
+    std.mem.writeInt(i16, sym_buf[12..14], 1, .little);
+    std.mem.writeInt(u16, sym_buf[14..16], 0x20, .little);
+    sym_buf[16] = 2; // External
+    sym_buf[17] = 0;
 
     const hdr = Header{
         .is_pe = false,
@@ -1071,13 +1191,12 @@ test "parse COFF symbol with long name referencing string table" {
     var sym_buf: [18]u8 = undefined;
     @memset(&sym_buf, 0);
 
-    // First 4 bytes are 0, next 4 bytes are string table offset (4)
     std.mem.writeInt(u32, sym_buf[0..4], 0, .little);
     std.mem.writeInt(u32, sym_buf[4..8], 4, .little);
     std.mem.writeInt(u32, sym_buf[8..12], 0, .little);
-    std.mem.writeInt(i16, sym_buf[12..14], SpecialSection.UNDEFINED, .little); // Section 0
+    std.mem.writeInt(i16, sym_buf[12..14], SpecialSection.UNDEFINED, .little);
     std.mem.writeInt(u16, sym_buf[14..16], 0x20, .little);
-    sym_buf[16] = 2; // External
+    sym_buf[16] = 2;
     sym_buf[17] = 0;
 
     const hdr = Header{
@@ -1103,7 +1222,6 @@ test "parse COFF symbol with long name referencing string table" {
 }
 
 test "parse COFF common and absolute symbols" {
-    // Common symbol: section 0, value > 0 (size in bytes)
     const common_sym = Symbol{
         .raw_name = [_]u8{ 'g', '_', 'b', 'u', 'f', 0, 0, 0 },
         .value = 1024,
@@ -1116,7 +1234,6 @@ test "parse COFF common and absolute symbols" {
     try std.testing.expect(common_sym.isCommon());
     try std.testing.expect(!common_sym.isUndefined());
 
-    // Absolute symbol: section -1
     const abs_sym = Symbol{
         .raw_name = [_]u8{ 'M', 'A', 'X', '_', 'S', 'Z', 0, 0 },
         .value = 4096,
@@ -1128,4 +1245,101 @@ test "parse COFF common and absolute symbols" {
 
     try std.testing.expect(abs_sym.isAbsolute());
     try std.testing.expect(!abs_sym.isUndefined());
+}
+
+test "parse 10-byte x86_64 COFF relocation entry" {
+    var rel_buf: [10]u8 = undefined;
+    @memset(&rel_buf, 0);
+
+    std.mem.writeInt(u32, rel_buf[0..4], 0x14, .little); // virtual_address (patch offset)
+    std.mem.writeInt(u32, rel_buf[4..8], 7, .little); // symbol_table_index (symbol #7)
+    std.mem.writeInt(u16, rel_buf[8..10], 0x0004, .little); // IMAGE_REL_AMD64_REL32
+
+    const sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 64,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 1,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_CODE,
+    };
+
+    const count = try sh.getRelocationCount(&rel_buf);
+    try std.testing.expectEqual(@as(u32, 1), count);
+
+    const rel = try sh.parseRelocation(&rel_buf, 0);
+    try std.testing.expectEqual(@as(u32, 0x14), rel.virtual_address);
+    try std.testing.expectEqual(@as(u32, 7), rel.symbol_table_index);
+    try std.testing.expectEqual(@as(u16, 0x0004), rel.type_id);
+    try std.testing.expectEqualStrings("REL32", rel.typeName(.x86_64));
+}
+
+test "parse ARM64 COFF relocation entry" {
+    var rel_buf: [10]u8 = undefined;
+    @memset(&rel_buf, 0);
+
+    std.mem.writeInt(u32, rel_buf[0..4], 0x40, .little);
+    std.mem.writeInt(u32, rel_buf[4..8], 12, .little);
+    std.mem.writeInt(u16, rel_buf[8..10], 0x0003, .little); // IMAGE_REL_ARM64_BRANCH26
+
+    const sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 128,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 1,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_CODE,
+    };
+
+    const rel = try sh.parseRelocation(&rel_buf, 0);
+    try std.testing.expectEqual(@as(u32, 0x40), rel.virtual_address);
+    try std.testing.expectEqual(@as(u32, 12), rel.symbol_table_index);
+    try std.testing.expectEqualStrings("BRANCH26", rel.typeName(.arm64));
+}
+
+test "parse COFF relocation with overflow table (LNK_NRELOC_OVFL)" {
+    // When count overflows 16 bits, number_of_relocations = 0xFFFF and LNK_NRELOC_OVFL is set.
+    // First 10 bytes store the actual 32-bit count (e.g. 70,000) in VirtualAddress.
+    // The next 10 bytes are the first real relocation entry.
+    var file_buf: [20]u8 = undefined;
+    @memset(&file_buf, 0);
+
+    // Entry 0: Overflow record holding count = 2
+    std.mem.writeInt(u32, file_buf[0..4], 1, .little); // Actual count: 1 relocation follows
+    std.mem.writeInt(u32, file_buf[4..8], 0, .little);
+    std.mem.writeInt(u16, file_buf[8..10], 0, .little);
+
+    // Entry 1: Actual relocation
+    std.mem.writeInt(u32, file_buf[10..14], 0x100, .little); // virtual_address = 0x100
+    std.mem.writeInt(u32, file_buf[14..18], 5, .little); // symbol #5
+    std.mem.writeInt(u16, file_buf[18..20], 0x0001, .little); // ADDR64
+
+    const sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 't', 'e', 'x', 't', 0, 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 512,
+        .pointer_to_raw_data = 0,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0xFFFF,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_CODE | section_flags.LNK_NRELOC_OVFL,
+    };
+
+    const count = try sh.getRelocationCount(&file_buf);
+    try std.testing.expectEqual(@as(u32, 1), count);
+
+    const rel = try sh.parseRelocation(&file_buf, 0);
+    try std.testing.expectEqual(@as(u32, 0x100), rel.virtual_address);
+    try std.testing.expectEqual(@as(u32, 5), rel.symbol_table_index);
+    try std.testing.expectEqualStrings("ADDR64", rel.typeName(.x86_64));
 }
