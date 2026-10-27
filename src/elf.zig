@@ -1,7 +1,7 @@
-//! Phase 2.1, 2.2, & 2.3: ELF Header, Section Table, and Symbol Table Parsers.
+//! Phase 2.1 - 2.5: ELF Header, Sections, Symbols, and Relocations.
 //!
-//! Provides zero-copy parsing for headers, sections, and symbols across
-//! 32-bit, 64-bit, little-endian, and big-endian targets.
+//! Provides zero-copy parsing for headers, section tables, symbol tables,
+//! and relocation entries across 32-bit and 64-bit ELF binaries.
 
 const std = @import("std");
 
@@ -28,8 +28,8 @@ pub const Class = enum(u8) {
 /// ELF data byte order encoding (EI_DATA).
 pub const DataEncoding = enum(u8) {
     none = 0,
-    lsb = 1, // Little-endian (2's complement)
-    msb = 2, // Big-endian (2's complement)
+    lsb = 1, // Little-endian
+    msb = 2, // Big-endian
 };
 
 /// ELF file type (e_type).
@@ -37,7 +37,7 @@ pub const FileType = enum(u16) {
     none = 0,
     rel = 1, // Relocatable object (.o)
     exec = 2, // Executable binary
-    dyn = 3, // Shared library (.so) or position-independent executable (PIE)
+    dyn = 3, // Shared library (.so) or PIE executable
     core = 4, // Core dump
     _,
 
@@ -200,13 +200,13 @@ pub const SymbolBinding = enum(u4) {
 /// Symbol type category (STT_*).
 pub const SymbolType = enum(u4) {
     notype = 0,
-    object = 1, // Data variable
-    func = 2, // Executable function
-    section = 3, // Section reference
-    file = 4, // Source filename
-    common = 5, // Unallocated common block
-    tls = 6, // Thread-local storage entity
-    gnu_ifunc = 10, // Indirect function resolver
+    object = 1,
+    func = 2,
+    section = 3,
+    file = 4,
+    common = 5,
+    tls = 6,
+    gnu_ifunc = 10,
     _,
 
     pub fn name(self: SymbolType) []const u8 {
@@ -252,32 +252,22 @@ pub const SpecialSectionIndex = struct {
 
 /// Normalized symbol representation for both 32-bit and 64-bit ELF symbols.
 pub const Symbol = struct {
-    /// Byte offset into the linked string table (.strtab or .dynstr)
     name_offset: u32,
-    /// Symbol address or section offset
     value: u64,
-    /// Size of the symbol entity in bytes
     size: u64,
-    /// Symbol binding (local, global, weak)
     binding: SymbolBinding,
-    /// Symbol type (func, object, section, etc.)
     sym_type: SymbolType,
-    /// Symbol visibility rule
     visibility: SymbolVisibility,
-    /// Section index defining this symbol (or SHN_UNDEF if undefined)
     shndx: u16,
 
-    /// Returns true if this symbol is undefined and needs to be resolved by the linker.
     pub fn isUndefined(self: Symbol) bool {
         return self.shndx == SpecialSectionIndex.UNDEF;
     }
 
-    /// Returns true if this symbol has an absolute value not tied to any section.
     pub fn isAbsolute(self: Symbol) bool {
         return self.shndx == SpecialSectionIndex.ABS;
     }
 
-    /// Extract symbol name string from the given string table bytes.
     pub fn getName(self: Symbol, strtab_bytes: []const u8) SectionError![:0]const u8 {
         if (self.name_offset >= strtab_bytes.len) {
             return error.StringTableOutOfBounds;
@@ -285,8 +275,75 @@ pub const Symbol = struct {
 
         const slice = strtab_bytes[self.name_offset..];
         const len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
-
         return slice[0..len :0];
+    }
+};
+
+// === Relocation Types and Helpers ===
+
+/// Normalized relocation record for both .rel and .rela entries.
+pub const Relocation = struct {
+    /// Byte offset within the target section where the relocation is applied
+    offset: u64,
+    /// Symbol table index referenced by this relocation
+    symbol_index: u32,
+    /// Architecture-specific relocation type identifier
+    type_id: u32,
+    /// Explicit addend value (0 if this entry came from a .rel section)
+    addend: i64,
+    /// True if the entry has an explicit addend (.rela)
+    has_explicit_addend: bool,
+
+    /// Return readable name of the relocation type for common architectures.
+    pub fn typeName(self: Relocation, machine: Machine) []const u8 {
+        return switch (machine) {
+            .aarch64 => switch (self.type_id) {
+                0 => "NONE",
+                257 => "ABS64",
+                258 => "ABS32",
+                261 => "PREL32",
+                275 => "ADR_PREL_PG_HI21",
+                277 => "ADD_ABS_LO12_NC",
+                282 => "JUMP26",
+                283 => "CALL26",
+                1025 => "GLOB_DAT",
+                1026 => "JUMP_SLOT",
+                1027 => "RELATIVE",
+                else => "AARCH64_RELOC",
+            },
+            .x86_64 => switch (self.type_id) {
+                0 => "NONE",
+                1 => "64",
+                2 => "PC32",
+                3 => "GOT32",
+                4 => "PLT32",
+                5 => "COPY",
+                6 => "GLOB_DAT",
+                7 => "JUMP_SLOT",
+                8 => "RELATIVE",
+                10 => "32",
+                11 => "32S",
+                24 => "PC64",
+                else => "X86_64_RELOC",
+            },
+            .arm => switch (self.type_id) {
+                0 => "NONE",
+                2 => "ABS32",
+                3 => "REL32",
+                28 => "CALL",
+                29 => "JUMP24",
+                else => "ARM_RELOC",
+            },
+            .riscv => switch (self.type_id) {
+                0 => "NONE",
+                1 => "32",
+                2 => "64",
+                18 => "BRANCH",
+                19 => "JAL",
+                else => "RISCV_RELOC",
+            },
+            else => "RELOC",
+        };
     }
 };
 
@@ -314,6 +371,13 @@ pub const SymbolError = error{
     StringTableOutOfBounds,
 };
 
+pub const RelocationError = error{
+    TruncatedRelocationTable,
+    InvalidRelocationIndex,
+    InvalidRelocationEntrySize,
+    UnsupportedRelocationFormat,
+};
+
 // === Section Header Representation ===
 
 /// Normalized section header representation for 32-bit and 64-bit ELF sections.
@@ -324,8 +388,8 @@ pub const SectionHeader = struct {
     addr: u64,
     offset: u64,
     size: u64,
-    link: u32, // For symtab/dynsym, points to the associated strtab section index
-    info: u32, // For symtab, contains index of first non-local symbol
+    link: u32, // Points to symtab for relocations and symbol tables
+    info: u32, // Points to target section being patched for relocations
     addralign: u64,
     entsize: u64,
 
@@ -366,11 +430,9 @@ pub const SectionHeader = struct {
 
         const slice = shstrtab_data[self.name_offset..];
         const len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
-
         return slice[0..len :0];
     }
 
-    /// Calculate how many symbol entries are in this section table.
     pub fn getSymbolCount(self: SectionHeader, class: Class) SymbolError!usize {
         const expected_entry_size: u64 = switch (class) {
             .elf64 => 24,
@@ -386,7 +448,6 @@ pub const SectionHeader = struct {
         return @intCast(self.size / entry_size);
     }
 
-    /// Parse a single symbol entry from a symbol table section.
     pub fn parseSymbol(
         self: SectionHeader,
         file_bytes: []const u8,
@@ -418,7 +479,6 @@ pub const SectionHeader = struct {
         };
     }
 
-    /// Parse all symbols from this table into an allocated slice.
     pub fn parseAllSymbols(
         self: SectionHeader,
         allocator: std.mem.Allocator,
@@ -436,6 +496,89 @@ pub const SectionHeader = struct {
         }
 
         return symbols;
+    }
+
+    // --- Relocation Methods ---
+
+    /// Calculate how many relocation entries exist in this section.
+    pub fn getRelocationCount(self: SectionHeader, class: Class) RelocationError!usize {
+        const is_rela = (self.sh_type == .rela or self.sh_type == .android_rela);
+        const is_rel = (self.sh_type == .rel or self.sh_type == .android_rel);
+
+        if (!is_rela and !is_rel) {
+            return error.UnsupportedRelocationFormat;
+        }
+
+        const expected_entry_size: u64 = switch (class) {
+            .elf64 => if (is_rela) 24 else 16,
+            .elf32 => if (is_rela) 12 else 8,
+            .none => return error.InvalidRelocationEntrySize,
+        };
+
+        const entry_size = if (self.entsize != 0) self.entsize else expected_entry_size;
+        if (entry_size != expected_entry_size) {
+            return error.InvalidRelocationEntrySize;
+        }
+
+        return @intCast(self.size / entry_size);
+    }
+
+    /// Parse a single relocation entry by index.
+    pub fn parseRelocation(
+        self: SectionHeader,
+        file_bytes: []const u8,
+        class: Class,
+        endian: std.builtin.Endian,
+        reloc_index: usize,
+    ) RelocationError!Relocation {
+        const count = try self.getRelocationCount(class);
+        if (reloc_index >= count) {
+            return error.InvalidRelocationIndex;
+        }
+
+        const is_rela = (self.sh_type == .rela or self.sh_type == .android_rela);
+        const entry_size: usize = switch (class) {
+            .elf64 => if (is_rela) 24 else 16,
+            .elf32 => if (is_rela) 12 else 8,
+            .none => return error.InvalidRelocationEntrySize,
+        };
+
+        const rel_offset = self.offset + (@as(u64, reloc_index) * entry_size);
+        const rel_end = rel_offset + entry_size;
+
+        if (rel_end > file_bytes.len) {
+            return error.TruncatedRelocationTable;
+        }
+
+        const start: usize = @intCast(rel_offset);
+        const end: usize = @intCast(rel_end);
+        const bytes = file_bytes[start..end];
+
+        return switch (class) {
+            .elf64 => parseRelocation64(bytes, endian, is_rela),
+            .elf32 => parseRelocation32(bytes, endian, is_rela),
+            .none => error.InvalidRelocationEntrySize,
+        };
+    }
+
+    /// Parse all relocation entries in this section into an allocated slice.
+    pub fn parseAllRelocations(
+        self: SectionHeader,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+        class: Class,
+        endian: std.builtin.Endian,
+    ) (RelocationError || std.mem.Allocator.Error)![]Relocation {
+        const count = try self.getRelocationCount(class);
+        const relocs = try allocator.alloc(Relocation, count);
+        errdefer allocator.free(relocs);
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            relocs[i] = try self.parseRelocation(file_bytes, class, endian, i);
+        }
+
+        return relocs;
     }
 };
 
@@ -690,6 +833,54 @@ fn parseSymbol32(bytes: []const u8, endian: std.builtin.Endian) SymbolError!Symb
     };
 }
 
+// --- Relocation Parser Helpers ---
+
+fn parseRelocation64(bytes: []const u8, endian: std.builtin.Endian, is_rela: bool) RelocationError!Relocation {
+    if (is_rela and bytes.len < 24) return error.TruncatedRelocationTable;
+    if (!is_rela and bytes.len < 16) return error.TruncatedRelocationTable;
+
+    const offset = std.mem.readInt(u64, bytes[0..8], endian);
+    const r_info = std.mem.readInt(u64, bytes[8..16], endian);
+    const sym_index: u32 = @intCast(r_info >> 32);
+    const type_id: u32 = @intCast(r_info & 0xFFFFFFFF);
+
+    const addend: i64 = if (is_rela)
+        std.mem.readInt(i64, bytes[16..24], endian)
+    else
+        0;
+
+    return .{
+        .offset = offset,
+        .symbol_index = sym_index,
+        .type_id = type_id,
+        .addend = addend,
+        .has_explicit_addend = is_rela,
+    };
+}
+
+fn parseRelocation32(bytes: []const u8, endian: std.builtin.Endian, is_rela: bool) RelocationError!Relocation {
+    if (is_rela and bytes.len < 12) return error.TruncatedRelocationTable;
+    if (!is_rela and bytes.len < 8) return error.TruncatedRelocationTable;
+
+    const offset = std.mem.readInt(u32, bytes[0..4], endian);
+    const r_info = std.mem.readInt(u32, bytes[4..8], endian);
+    const sym_index: u32 = r_info >> 8;
+    const type_id: u32 = r_info & 0xFF;
+
+    const addend: i64 = if (is_rela)
+        @as(i64, std.mem.readInt(i32, bytes[8..12], endian))
+    else
+        0;
+
+    return .{
+        .offset = offset,
+        .symbol_index = sym_index,
+        .type_id = type_id,
+        .addend = addend,
+        .has_explicit_addend = is_rela,
+    };
+}
+
 // === Unit Tests ===
 
 test "reject file with invalid magic bytes" {
@@ -727,8 +918,8 @@ test "parse 64-bit little-endian ELF relocatable header" {
     hdr_buf[7] = 0; // System V
     hdr_buf[8] = 0; // ABI version
 
-    std.mem.writeInt(u16, hdr_buf[16..18], 1, .little); // ET_REL
-    std.mem.writeInt(u16, hdr_buf[18..20], 183, .little); // EM_AARCH64
+    std.mem.writeInt(u16, hdr_buf[16..18], 1, .little);
+    std.mem.writeInt(u16, hdr_buf[18..20], 183, .little);
     std.mem.writeInt(u32, hdr_buf[20..24], 1, .little);
     std.mem.writeInt(u64, hdr_buf[24..32], 0, .little);
     std.mem.writeInt(u64, hdr_buf[32..40], 0, .little);
@@ -763,8 +954,8 @@ test "parse 32-bit big-endian ELF header" {
     hdr_buf[5] = 2; // ELFDATA2MSB (big-endian)
     hdr_buf[6] = 1; // EV_CURRENT
 
-    std.mem.writeInt(u16, hdr_buf[16..18], 2, .big); // ET_EXEC
-    std.mem.writeInt(u16, hdr_buf[18..20], 40, .big); // EM_ARM
+    std.mem.writeInt(u16, hdr_buf[16..18], 2, .big);
+    std.mem.writeInt(u16, hdr_buf[18..20], 40, .big);
     std.mem.writeInt(u32, hdr_buf[20..24], 1, .big);
     std.mem.writeInt(u32, hdr_buf[24..28], 0x8000, .big);
     std.mem.writeInt(u32, hdr_buf[28..32], 0x34, .big);
@@ -796,7 +987,7 @@ test "parse 64-bit ELF section header" {
     @memset(&sh_buf, 0);
 
     std.mem.writeInt(u32, sh_buf[0..4], 12, .little);
-    std.mem.writeInt(u32, sh_buf[4..8], 1, .little); // SHT_PROGBITS
+    std.mem.writeInt(u32, sh_buf[4..8], 1, .little);
     std.mem.writeInt(u64, sh_buf[8..16], flags.ALLOC | flags.EXECINSTR, .little);
     std.mem.writeInt(u64, sh_buf[16..24], 0x400000, .little);
     std.mem.writeInt(u64, sh_buf[24..32], 0x100, .little);
@@ -831,7 +1022,7 @@ test "parse 32-bit ELF section header" {
     @memset(&sh_buf, 0);
 
     std.mem.writeInt(u32, sh_buf[0..4], 5, .big);
-    std.mem.writeInt(u32, sh_buf[4..8], 8, .big); // SHT_NOBITS (.bss)
+    std.mem.writeInt(u32, sh_buf[4..8], 8, .big);
     std.mem.writeInt(u32, sh_buf[8..12], @as(u32, @truncate(flags.ALLOC | flags.WRITE)), .big);
     std.mem.writeInt(u32, sh_buf[12..16], 0x20000, .big);
     std.mem.writeInt(u32, sh_buf[16..20], 0x80, .big);
@@ -960,12 +1151,12 @@ test "parse 64-bit ELF symbol entry" {
     var sym_buf: [24]u8 = undefined;
     @memset(&sym_buf, 0);
 
-    std.mem.writeInt(u32, sym_buf[0..4], 14, .little); // st_name
-    sym_buf[4] = (1 << 4) | 2; // STB_GLOBAL (1) | STT_FUNC (2)
-    sym_buf[5] = 0; // STV_DEFAULT
-    std.mem.writeInt(u16, sym_buf[6..8], 1, .little); // st_shndx (section 1: .text)
-    std.mem.writeInt(u64, sym_buf[8..16], 0x401000, .little); // st_value
-    std.mem.writeInt(u64, sym_buf[16..24], 128, .little); // st_size
+    std.mem.writeInt(u32, sym_buf[0..4], 14, .little);
+    sym_buf[4] = (1 << 4) | 2;
+    sym_buf[5] = 0;
+    std.mem.writeInt(u16, sym_buf[6..8], 1, .little);
+    std.mem.writeInt(u64, sym_buf[8..16], 0x401000, .little);
+    std.mem.writeInt(u64, sym_buf[16..24], 128, .little);
 
     const sym = try parseSymbol64(&sym_buf, .little);
 
@@ -984,12 +1175,12 @@ test "parse 32-bit ELF symbol entry" {
     var sym_buf: [16]u8 = undefined;
     @memset(&sym_buf, 0);
 
-    std.mem.writeInt(u32, sym_buf[0..4], 8, .big); // st_name
-    std.mem.writeInt(u32, sym_buf[4..8], 0x20004, .big); // st_value
-    std.mem.writeInt(u32, sym_buf[8..12], 4, .big); // st_size
-    sym_buf[12] = (2 << 4) | 1; // STB_WEAK (2) | STT_OBJECT (1)
-    sym_buf[13] = 2; // STV_HIDDEN (2)
-    std.mem.writeInt(u16, sym_buf[14..16], SpecialSectionIndex.UNDEF, .big); // undefined
+    std.mem.writeInt(u32, sym_buf[0..4], 8, .big);
+    std.mem.writeInt(u32, sym_buf[4..8], 0x20004, .big);
+    std.mem.writeInt(u32, sym_buf[8..12], 4, .big);
+    sym_buf[12] = (2 << 4) | 1;
+    sym_buf[13] = 2;
+    std.mem.writeInt(u16, sym_buf[14..16], SpecialSectionIndex.UNDEF, .big);
 
     const sym = try parseSymbol32(&sym_buf, .big);
 
@@ -1003,7 +1194,7 @@ test "parse 32-bit ELF symbol entry" {
 }
 
 test "symbol name extraction from strtab bytes" {
-    const strtab = "\x00main\x00printf\x00global_counter\x00";
+    const strtab_mock = "\x00main\x00printf\x00global_counter\x00";
 
     const sym_main = Symbol{
         .name_offset = 1,
@@ -1025,6 +1216,75 @@ test "symbol name extraction from strtab bytes" {
         .shndx = SpecialSectionIndex.UNDEF,
     };
 
-    try std.testing.expectEqualStrings("main", try sym_main.getName(strtab));
-    try std.testing.expectEqualStrings("printf", try sym_printf.getName(strtab));
+    try std.testing.expectEqualStrings("main", try sym_main.getName(strtab_mock));
+    try std.testing.expectEqualStrings("printf", try sym_printf.getName(strtab_mock));
+}
+
+test "parse 64-bit ELF rela entry" {
+    var rela_buf: [24]u8 = undefined;
+    @memset(&rela_buf, 0);
+
+    std.mem.writeInt(u64, rela_buf[0..8], 0x1024, .little); // r_offset
+    // r_info: symbol index 5, type 275 (R_AARCH64_ADR_PREL_PG_HI21)
+    const r_info: u64 = (@as(u64, 5) << 32) | @as(u64, 275);
+    std.mem.writeInt(u64, rela_buf[8..16], r_info, .little);
+    std.mem.writeInt(i64, rela_buf[16..24], -4, .little); // r_addend
+
+    const rel = try parseRelocation64(&rela_buf, .little, true);
+
+    try std.testing.expectEqual(@as(u64, 0x1024), rel.offset);
+    try std.testing.expectEqual(@as(u32, 5), rel.symbol_index);
+    try std.testing.expectEqual(@as(u32, 275), rel.type_id);
+    try std.testing.expectEqual(@as(i64, -4), rel.addend);
+    try std.testing.expect(rel.has_explicit_addend);
+    try std.testing.expectEqualStrings("ADR_PREL_PG_HI21", rel.typeName(.aarch64));
+}
+
+test "parse 64-bit ELF rel entry without addend" {
+    var rel_buf: [16]u8 = undefined;
+    @memset(&rel_buf, 0);
+
+    std.mem.writeInt(u64, rel_buf[0..8], 0x2000, .little);
+    const r_info: u64 = (@as(u64, 12) << 32) | @as(u64, 7); // R_X86_64_JUMP_SLOT
+    std.mem.writeInt(u64, rel_buf[8..16], r_info, .little);
+
+    const rel = try parseRelocation64(&rel_buf, .little, false);
+
+    try std.testing.expectEqual(@as(u64, 0x2000), rel.offset);
+    try std.testing.expectEqual(@as(u32, 12), rel.symbol_index);
+    try std.testing.expectEqual(@as(u32, 7), rel.type_id);
+    try std.testing.expectEqual(@as(i64, 0), rel.addend);
+    try std.testing.expect(!rel.has_explicit_addend);
+    try std.testing.expectEqualStrings("JUMP_SLOT", rel.typeName(.x86_64));
+}
+
+test "parse 32-bit ELF rela and rel entries" {
+    // 32-bit Rela (12 bytes)
+    var rela32_buf: [12]u8 = undefined;
+    @memset(&rela32_buf, 0);
+
+    std.mem.writeInt(u32, rela32_buf[0..4], 0x400, .big);
+    const r_info32: u32 = (@as(u32, 3) << 8) | @as(u32, 2); // sym 3, type 2
+    std.mem.writeInt(u32, rela32_buf[4..8], r_info32, .big);
+    std.mem.writeInt(i32, rela32_buf[8..12], 16, .big);
+
+    const rela = try parseRelocation32(&rela32_buf, .big, true);
+    try std.testing.expectEqual(@as(u64, 0x400), rela.offset);
+    try std.testing.expectEqual(@as(u32, 3), rela.symbol_index);
+    try std.testing.expectEqual(@as(u32, 2), rela.type_id);
+    try std.testing.expectEqual(@as(i64, 16), rela.addend);
+    try std.testing.expect(rela.has_explicit_addend);
+
+    // 32-bit Rel (8 bytes)
+    var rel32_buf: [8]u8 = undefined;
+    @memset(&rel32_buf, 0);
+
+    std.mem.writeInt(u32, rel32_buf[0..4], 0x800, .big);
+    std.mem.writeInt(u32, rel32_buf[4..8], r_info32, .big);
+
+    const rel = try parseRelocation32(&rel32_buf, .big, false);
+    try std.testing.expectEqual(@as(u64, 0x800), rel.offset);
+    try std.testing.expectEqual(@as(u32, 3), rel.symbol_index);
+    try std.testing.expectEqual(@as(i64, 0), rel.addend);
+    try std.testing.expect(!rel.has_explicit_addend);
 }

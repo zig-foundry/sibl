@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("  Entry Point   : {s}\n", .{final_entry});
     std.debug.print("  Shared Mode   : {}\n", .{options.is_shared});
 
-    // Phase 1.5, 2.1, 2.2, & 2.3: Process input files
+    // Phase 1.5 - 2.5: Process input files
     std.debug.print("  Input Files ({d}):\n", .{options.input_files.items.len});
     for (options.input_files.items) |file_path| {
         var mapped = sibl.MappedFile.open(io, file_path) catch |err| {
@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
         };
         defer mapped.deinit(io);
 
-        // If file starts with ELF magic, parse header, sections, and symbols
+        // If file starts with ELF magic, parse header, sections, symbols, and relocations
         if (mapped.data.len >= 4 and std.mem.eql(u8, mapped.data[0..4], &sibl.elf.MAGIC)) {
             const elf_hdr = sibl.elf.Header.parse(mapped.data) catch |err| {
                 std.debug.print("sibl: error: failed to parse ELF header for '{s}': {s}\n", .{ file_path, @errorName(err) });
@@ -91,7 +91,6 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
 
-            // Inspect sections
             for (sections, 0..) |sh, idx| {
                 if (sh.sh_type == .null) continue;
                 const name = sh.getName(shstrtab) catch "<unnamed>";
@@ -106,25 +105,24 @@ pub fn main(init: std.process.Init) !void {
                     if (sh.isExecutable()) "X" else "",
                 });
 
-                // Phase 2.3: If this is a symbol table, read symbols from it
+                // Phase 2.3: Symbols
                 if (sh.sh_type == .symtab or sh.sh_type == .dynsym) {
                     const strtab_sh = if (sh.link < sections.len) sections[sh.link] else null;
                     const strtab_data = if (strtab_sh) |s| s.getData(mapped.data) catch &.{} else &.{};
 
                     const sym_count = sh.getSymbolCount(elf_hdr.class) catch 0;
-                    std.debug.print("          -> Symbol Table contains {d} symbols (linked to strtab [{d}]):\n", .{
+                    std.debug.print("          -> Symbol Table: {d} symbols (linked to strtab [{d}]):\n", .{
                         sym_count,
                         sh.link,
                     });
 
-                    // Print first 8 symbols to keep output readable
-                    const print_limit = @min(sym_count, 8);
+                    const print_limit = @min(sym_count, 6);
                     var sym_idx: usize = 0;
                     while (sym_idx < print_limit) : (sym_idx += 1) {
                         const sym = sh.parseSymbol(mapped.data, elf_hdr.class, elf_hdr.endian, sym_idx) catch continue;
                         const sym_name = sym.getName(strtab_data) catch "<unnamed>";
 
-                        std.debug.print("             ({d:2}) {s:<24} value=0x{x:<8} size={d:<4} bind={s:<6} type={s:<7} shndx={d}\n", .{
+                        std.debug.print("             ({d:2}) {s:<22} val=0x{x:<8} sz={d:<4} bind={s:<6} type={s:<7} shndx={d}\n", .{
                             sym_idx,
                             if (sym_name.len == 0) "<empty>" else sym_name,
                             sym.value,
@@ -137,6 +135,58 @@ pub fn main(init: std.process.Init) !void {
 
                     if (sym_count > print_limit) {
                         std.debug.print("             ... and {d} more symbols\n", .{sym_count - print_limit});
+                    }
+                }
+
+                // Phase 2.5: Relocations
+                const is_rela = (sh.sh_type == .rela or sh.sh_type == .android_rela);
+                const is_rel = (sh.sh_type == .rel or sh.sh_type == .android_rel);
+                if (is_rela or is_rel) {
+                    const reloc_count = sh.getRelocationCount(elf_hdr.class) catch 0;
+                    const target_sec_name = if (sh.info < sections.len)
+                        sections[sh.info].getName(shstrtab) catch "<sec>"
+                    else
+                        "<none>";
+
+                    // Corresponding symbol table
+                    const symtab_sh = if (sh.link < sections.len) sections[sh.link] else null;
+                    const symtab_strtab_sh = if (symtab_sh != null and symtab_sh.?.link < sections.len)
+                        sections[symtab_sh.?.link]
+                    else
+                        null;
+                    const strtab_data = if (symtab_strtab_sh) |s| s.getData(mapped.data) catch &.{} else &.{};
+
+                    std.debug.print("          -> Relocation Table: {d} entries patching section [{d}] {s}:\n", .{
+                        reloc_count,
+                        sh.info,
+                        target_sec_name,
+                    });
+
+                    const print_limit = @min(reloc_count, 6);
+                    var r_idx: usize = 0;
+                    while (r_idx < print_limit) : (r_idx += 1) {
+                        const r = sh.parseRelocation(mapped.data, elf_hdr.class, elf_hdr.endian, r_idx) catch continue;
+
+                        // Try to find the symbol's name
+                        var sym_name: []const u8 = "<none>";
+                        if (symtab_sh) |s_sh| {
+                            if (s_sh.parseSymbol(mapped.data, elf_hdr.class, elf_hdr.endian, r.symbol_index)) |sym| {
+                                sym_name = sym.getName(strtab_data) catch "<unnamed>";
+                            } else |_| {}
+                        }
+
+                        std.debug.print("             ({d:2}) off=0x{x:<8} type={s:<18} sym=[{d:2}] {s:<18} addend={d}\n", .{
+                            r_idx,
+                            r.offset,
+                            r.typeName(elf_hdr.machine),
+                            r.symbol_index,
+                            if (sym_name.len == 0) "<empty>" else sym_name,
+                            r.addend,
+                        });
+                    }
+
+                    if (reloc_count > print_limit) {
+                        std.debug.print("             ... and {d} more relocations\n", .{reloc_count - print_limit});
                     }
                 }
             }

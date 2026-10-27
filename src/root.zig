@@ -19,7 +19,7 @@ pub const target = @import("target.zig");
 /// Zero-copy memory mapped file reader (Phase 1.5).
 pub const file = @import("file.zig");
 
-/// ELF parsing and format inspection (Phase 2.1, 2.2, & 2.3).
+/// ELF parsing and format inspection (Phase 2.1 - 2.5).
 pub const elf = @import("elf.zig");
 
 /// String table reader and deduplicating builder (Phase 2.4).
@@ -62,6 +62,10 @@ pub const ElfSymbolBinding = elf.SymbolBinding;
 pub const ElfSymbolType = elf.SymbolType;
 pub const ElfSymbolVisibility = elf.SymbolVisibility;
 pub const SpecialSectionIndex = elf.SpecialSectionIndex;
+
+// Relocation types
+pub const ElfRelocation = elf.Relocation;
+pub const RelocationError = elf.RelocationError;
 
 // String table types
 pub const StringTableReader = strtab.StringTableReader;
