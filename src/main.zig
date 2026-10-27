@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
                 });
             }
 
-            // Phase 3.2: Parse and print COFF sections
+            // Phase 3.2: Parse and print sections
             const strtab_bytes = coff_hdr.getStringTable(mapped.data);
             const coff_sections = coff_hdr.parseAllSectionHeaders(arena, mapped.data) catch continue;
 
@@ -141,6 +141,33 @@ pub fn main(init: std.process.Init) !void {
                     if (csh.isWritable()) "W" else "",
                     if (csh.isExecutable()) "X" else "",
                 });
+            }
+
+            // Phase 3.3: Parse and print symbols
+            if (coff_hdr.symbol_count > 0) {
+                std.debug.print("          -> COFF Symbol Table: {d} symbols:\n", .{coff_hdr.symbol_count});
+                const print_limit = @min(coff_hdr.symbol_count, 8);
+                var sym_idx: usize = 0;
+                while (sym_idx < print_limit) {
+                    const sym = coff_hdr.parseSymbol(mapped.data, sym_idx) catch break;
+                    const sym_name = sym.getName(strtab_bytes) catch "<unnamed>";
+
+                    std.debug.print("             ({d:2}) {s:<24} val=0x{x:<8} sec={d:<3} class={s:<10} aux={d}\n", .{
+                        sym_idx,
+                        sym_name,
+                        sym.value,
+                        sym.section_number,
+                        sym.storage_class.name(),
+                        sym.num_aux_symbols,
+                    });
+
+                    // Advance index past any auxiliary records
+                    sym_idx += 1 + @as(usize, sym.num_aux_symbols);
+                }
+
+                if (coff_hdr.symbol_count > print_limit) {
+                    std.debug.print("             ... and more symbols\n", .{});
+                }
             }
         } else |_| {
             std.debug.print("    - {s} ({d} bytes mapped, non-binary/unknown)\n", .{ file_path, mapped.size });

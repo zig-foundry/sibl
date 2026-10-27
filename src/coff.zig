@@ -1,4 +1,4 @@
-//! Phase 3.1 & 3.2: DOS, COFF Header, and Section Table Parser for sibl.
+//! Phase 3.1, 3.2, & 3.3: DOS, COFF Header, Sections, and Symbol Table Parser.
 //!
 //! Provides zero-copy parsing for Windows PE executables (.exe, .dll)
 //! and raw COFF relocatable object files (.obj).
@@ -69,25 +69,97 @@ pub const characteristics = struct {
 /// Section characteristics bitmask (IMAGE_SCN_*).
 pub const section_flags = struct {
     pub const TYPE_NO_PAD: u32 = 0x00000008;
-    pub const CNT_CODE: u32 = 0x00000020; // Section contains executable code
-    pub const CNT_INITIALIZED_DATA: u32 = 0x00000040; // Section contains initialized data
-    pub const CNT_UNINITIALIZED_DATA: u32 = 0x00000080; // Section contains uninitialized data (.bss)
-    pub const LNK_INFO: u32 = 0x00000200; // Section contains comments or other info
-    pub const LNK_REMOVE: u32 = 0x00000800; // Section will not become part of image
-    pub const LNK_COMDAT: u32 = 0x00001000; // Section contains COMDAT data
-    pub const GPREL: u32 = 0x00008000; // Section contains data referenced through GP
+    pub const CNT_CODE: u32 = 0x00000020;
+    pub const CNT_INITIALIZED_DATA: u32 = 0x00000040;
+    pub const CNT_UNINITIALIZED_DATA: u32 = 0x00000080;
+    pub const LNK_INFO: u32 = 0x00000200;
+    pub const LNK_REMOVE: u32 = 0x00000800;
+    pub const LNK_COMDAT: u32 = 0x00001000;
+    pub const GPREL: u32 = 0x00008000;
     pub const MEM_PURGEABLE: u32 = 0x00020000;
     pub const MEM_16BIT: u32 = 0x00020000;
     pub const MEM_LOCKED: u32 = 0x00040000;
     pub const MEM_PRELOAD: u32 = 0x00080000;
-    pub const LNK_NRELOC_OVFL: u32 = 0x01000000; // Section contains extended relocations
-    pub const MEM_DISCARDABLE: u32 = 0x02000000; // Section can be discarded as needed
-    pub const MEM_NOT_CACHED: u32 = 0x04000000; // Section cannot be cached
-    pub const MEM_NOT_PAGED: u32 = 0x08000000; // Section cannot be paged
-    pub const MEM_SHARED: u32 = 0x10000000; // Section can be shared in memory
-    pub const MEM_EXECUTE: u32 = 0x20000000; // Section can be executed as code
-    pub const MEM_READ: u32 = 0x40000000; // Section can be read
-    pub const MEM_WRITE: u32 = 0x80000000; // Section can be written to
+    pub const LNK_NRELOC_OVFL: u32 = 0x01000000;
+    pub const MEM_DISCARDABLE: u32 = 0x02000000;
+    pub const MEM_NOT_CACHED: u32 = 0x04000000;
+    pub const MEM_NOT_PAGED: u32 = 0x08000000;
+    pub const MEM_SHARED: u32 = 0x10000000;
+    pub const MEM_EXECUTE: u32 = 0x20000000;
+    pub const MEM_READ: u32 = 0x40000000;
+    pub const MEM_WRITE: u32 = 0x80000000;
+};
+
+/// COFF symbol storage class identifiers (IMAGE_SYM_CLASS_*).
+pub const StorageClass = enum(u8) {
+    null = 0,
+    automatic = 1,
+    external = 2,
+    static = 3,
+    register = 4,
+    external_def = 5,
+    label = 6,
+    undefined_label = 7,
+    member_of_struct = 8,
+    argument = 9,
+    struct_tag = 10,
+    member_of_union = 11,
+    union_tag = 12,
+    type_definition = 13,
+    undefined_static = 14,
+    enum_tag = 15,
+    member_of_enum = 16,
+    register_param = 17,
+    bit_field = 18,
+    block = 100, // .bb or .eb
+    function = 101, // .bf or .ef
+    end_of_struct = 102,
+    file = 103, // .file
+    section = 104,
+    weak_external = 105,
+    clr_token = 107,
+    end_of_function = 0xFF,
+    _,
+
+    pub fn name(self: StorageClass) []const u8 {
+        return switch (self) {
+            .null => "NULL",
+            .automatic => "AUTOMATIC",
+            .external => "EXTERNAL",
+            .static => "STATIC",
+            .register => "REGISTER",
+            .external_def => "EXT_DEF",
+            .label => "LABEL",
+            .undefined_label => "UNDEF_LABEL",
+            .member_of_struct => "STRUCT_MEM",
+            .argument => "ARGUMENT",
+            .struct_tag => "STRUCT_TAG",
+            .member_of_union => "UNION_MEM",
+            .union_tag => "UNION_TAG",
+            .type_definition => "TYPEDEF",
+            .undefined_static => "UNDEF_STATIC",
+            .enum_tag => "ENUM_TAG",
+            .member_of_enum => "ENUM_MEM",
+            .register_param => "REG_PARAM",
+            .bit_field => "BIT_FIELD",
+            .block => "BLOCK",
+            .function => "FUNCTION",
+            .end_of_struct => "END_STRUCT",
+            .file => "FILE",
+            .section => "SECTION",
+            .weak_external => "WEAK_EXT",
+            .clr_token => "CLR_TOKEN",
+            .end_of_function => "END_OF_FUNC",
+            _ => "UNKNOWN",
+        };
+    }
+};
+
+/// Special section numbers in COFF symbol table.
+pub const SpecialSection = struct {
+    pub const UNDEFINED: i16 = 0; // External undefined or common symbol
+    pub const ABSOLUTE: i16 = -1; // Absolute symbol constant
+    pub const DEBUG: i16 = -2; // Debug info symbol
 };
 
 /// Windows Subsystem types.
@@ -183,79 +255,64 @@ pub const SectionError = error{
     InvalidStringOffset,
 };
 
+pub const SymbolError = error{
+    TruncatedSymbolTable,
+    InvalidSymbolIndex,
+    StringTableOutOfBounds,
+};
+
 // === Section Header Representation ===
 
 /// Normalized representation for a 40-byte COFF / PE section header.
 pub const SectionHeader = struct {
-    /// Raw 8-byte name buffer from the header
     raw_name: [8]u8,
-    /// Total size in memory when loaded (or 0 for object files)
     virtual_size: u32,
-    /// Relative virtual address (RVA) in memory
     virtual_address: u32,
-    /// Size of raw data on disk
     size_of_raw_data: u32,
-    /// File pointer to raw data bytes
     pointer_to_raw_data: u32,
-    /// File pointer to relocation entries
     pointer_to_relocations: u32,
-    /// File pointer to line numbers (deprecated)
     pointer_to_linenumbers: u32,
-    /// Number of relocation entries
     number_of_relocations: u16,
-    /// Number of line numbers (deprecated)
     number_of_linenumbers: u16,
-    /// Characteristics bitmask flags
     characteristics: u32,
 
-    /// Returns true if section contains executable instructions.
     pub fn isExecutable(self: SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_EXECUTE) != 0;
     }
 
-    /// Returns true if section memory is readable at runtime.
     pub fn isReadable(self: SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_READ) != 0;
     }
 
-    /// Returns true if section memory is writable at runtime.
     pub fn isWritable(self: SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_WRITE) != 0;
     }
 
-    /// Returns true if section contains machine code.
     pub fn hasCode(self: SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_CODE) != 0;
     }
 
-    /// Returns true if section contains initialized variables.
     pub fn hasInitializedData(self: SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_INITIALIZED_DATA) != 0;
     }
 
-    /// Returns true if section contains uninitialized data (.bss).
     pub fn hasUninitializedData(self: SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_UNINITIALIZED_DATA) != 0;
     }
 
-    /// Returns true if this section is a COMDAT section.
     pub fn isComdat(self: SectionHeader) bool {
         return (self.characteristics & section_flags.LNK_COMDAT) != 0;
     }
 
-    /// Compute byte alignment required for this section (1 to 8192 bytes).
     pub fn getAlignment(self: SectionHeader) u32 {
         const align_val = (self.characteristics >> 20) & 0x0F;
-        if (align_val == 0) return 16; // Default to 16 bytes if unspecified
+        if (align_val == 0) return 16;
         if (align_val > 14) return 8192;
         return @as(u32, 1) << @intCast(align_val - 1);
     }
 
-    /// Extract section name string, resolving long names from the COFF string table if needed.
-    pub fn getName(self: SectionHeader, strtab_bytes: []const u8) SectionError![]const u8 {
-        // If name begins with '/', it references an offset in the string table (e.g. "/4")
+    pub fn getName(self: *const SectionHeader, strtab_bytes: []const u8) SectionError![]const u8 {
         if (self.raw_name[0] == '/') {
-            // Find null terminator or end of 8-byte field
             const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
             const num_str = self.raw_name[1..len];
 
@@ -272,12 +329,10 @@ pub const SectionHeader = struct {
             return slice[0..str_len];
         }
 
-        // Inline short name (up to 8 characters)
         const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
         return self.raw_name[0..len];
     }
 
-    /// Retrieve raw section bytes from the file buffer.
     pub fn getData(self: SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
         if (self.size_of_raw_data == 0) return &.{};
 
@@ -291,6 +346,75 @@ pub const SectionHeader = struct {
         }
 
         return file_bytes[start..end];
+    }
+};
+
+// === Symbol Table Representation ===
+
+/// Normalized representation for an 18-byte COFF symbol entry.
+pub const Symbol = struct {
+    /// Raw 8-byte name buffer (either inline ASCII or [0,0,0,0, offset])
+    raw_name: [8]u8,
+    /// Value of symbol (section offset, constant value, or common size)
+    value: u32,
+    /// 1-based section index, or SpecialSection (0 = UNDEF/COMMON, -1 = ABS, -2 = DEBUG)
+    section_number: i16,
+    /// Type field (MSB = derived type, LSB = base type, e.g. 0x20 = function)
+    sym_type: u16,
+    /// Storage class defining symbol visibility and binding
+    storage_class: StorageClass,
+    /// Number of auxiliary 18-byte symbol records following this one
+    num_aux_symbols: u8,
+
+    /// Returns true if this is an undefined external symbol that needs to be linked.
+    pub fn isUndefined(self: Symbol) bool {
+        return self.section_number == SpecialSection.UNDEFINED and self.value == 0;
+    }
+
+    /// Returns true if this is a COMMON symbol (uninitialized variable with size in value).
+    pub fn isCommon(self: Symbol) bool {
+        return self.section_number == SpecialSection.UNDEFINED and self.value > 0;
+    }
+
+    /// Returns true if this symbol has an absolute constant value.
+    pub fn isAbsolute(self: Symbol) bool {
+        return self.section_number == SpecialSection.ABSOLUTE;
+    }
+
+    /// Returns true if this symbol is globally visible across object files.
+    pub fn isExternal(self: Symbol) bool {
+        return self.storage_class == .external;
+    }
+
+    /// Returns true if this symbol is private to this object file.
+    pub fn isStatic(self: Symbol) bool {
+        return self.storage_class == .static;
+    }
+
+    /// Returns true if this symbol represents an executable function.
+    pub fn isFunction(self: Symbol) bool {
+        return (self.sym_type & 0x20) != 0 or self.storage_class == .function;
+    }
+
+    /// Extract symbol name string, resolving long names from the COFF string table.
+    pub fn getName(self: *const Symbol, strtab_bytes: []const u8) SymbolError![]const u8 {
+
+        // If first 4 bytes are 0, the next 4 bytes are an offset into the string table
+        const zeroes = std.mem.readInt(u32, self.raw_name[0..4], .little);
+        if (zeroes == 0) {
+            const offset = std.mem.readInt(u32, self.raw_name[4..8], .little);
+            if (offset >= strtab_bytes.len) {
+                return error.StringTableOutOfBounds;
+            }
+
+            const slice = strtab_bytes[offset..];
+            const len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
+            return slice[0..len];
+        }
+
+        // Inline short name (up to 8 bytes, null-padded)
+        const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
+        return self.raw_name[0..len];
     }
 };
 
@@ -336,7 +460,6 @@ pub const Header = struct {
         return error.NotCoffOrPe;
     }
 
-    /// Parse a single section header entry by index (each is 40 bytes).
     pub fn parseSectionHeader(self: Header, file_bytes: []const u8, index: usize) SectionError!SectionHeader {
         if (index >= self.section_count) {
             return error.InvalidSectionIndex;
@@ -367,7 +490,6 @@ pub const Header = struct {
         };
     }
 
-    /// Parse all section headers into an allocated slice.
     pub fn parseAllSectionHeaders(
         self: Header,
         allocator: std.mem.Allocator,
@@ -384,9 +506,6 @@ pub const Header = struct {
         return sections;
     }
 
-    /// Retrieve raw slice of the COFF string table.
-    /// In COFF, the string table begins immediately after the symbol table:
-    /// string_table_offset = symbol_table_offset + (symbol_count * 18).
     pub fn getStringTable(self: Header, file_bytes: []const u8) []const u8 {
         if (self.symbol_table_offset == 0 or self.symbol_count == 0) {
             return &.{};
@@ -395,7 +514,6 @@ pub const Header = struct {
         const sym_table_bytes = @as(usize, self.symbol_count) * 18;
         const strtab_offset: usize = self.symbol_table_offset + sym_table_bytes;
 
-        // The first 4 bytes of the string table is a u32 storing its total size
         if (strtab_offset + 4 > file_bytes.len) {
             return &.{};
         }
@@ -406,6 +524,50 @@ pub const Header = struct {
         }
 
         return file_bytes[strtab_offset .. strtab_offset + strtab_size];
+    }
+
+    /// Parse a single 18-byte symbol entry by its index.
+    pub fn parseSymbol(self: Header, file_bytes: []const u8, index: usize) SymbolError!Symbol {
+        if (index >= self.symbol_count) {
+            return error.InvalidSymbolIndex;
+        }
+
+        const offset: usize = self.symbol_table_offset + (index * 18);
+        const end: usize = offset + 18;
+
+        if (end > file_bytes.len) {
+            return error.TruncatedSymbolTable;
+        }
+
+        const sym_bytes = file_bytes[offset..end];
+        var name_buf: [8]u8 = undefined;
+        @memcpy(&name_buf, sym_bytes[0..8]);
+
+        return .{
+            .raw_name = name_buf,
+            .value = std.mem.readInt(u32, sym_bytes[8..][0..4], .little),
+            .section_number = std.mem.readInt(i16, sym_bytes[12..][0..2], .little),
+            .sym_type = std.mem.readInt(u16, sym_bytes[14..][0..2], .little),
+            .storage_class = @fromBackingInt(@intCast(sym_bytes[16])),
+            .num_aux_symbols = sym_bytes[17],
+        };
+    }
+
+    /// Parse all symbol table entries into an allocated slice.
+    pub fn parseAllSymbols(
+        self: Header,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+    ) (SymbolError || std.mem.Allocator.Error)![]Symbol {
+        const symbols = try allocator.alloc(Symbol, self.symbol_count);
+        errdefer allocator.free(symbols);
+
+        var i: usize = 0;
+        while (i < self.symbol_count) : (i += 1) {
+            symbols[i] = try self.parseSymbol(file_bytes, i);
+        }
+
+        return symbols;
     }
 
     // --- Private Parsers ---
@@ -790,13 +952,12 @@ test "parse 40-byte COFF section header" {
     @memset(&sh_buf, 0);
 
     @memcpy(sh_buf[0..5], ".text");
-    std.mem.writeInt(u32, sh_buf[8..12], 0x120, .little); // VirtualSize
-    std.mem.writeInt(u32, sh_buf[12..16], 0x1000, .little); // VirtualAddress
-    std.mem.writeInt(u32, sh_buf[16..20], 0x200, .little); // SizeOfRawData
-    std.mem.writeInt(u32, sh_buf[20..24], 0x400, .little); // PointerToRawData
-    std.mem.writeInt(u32, sh_buf[24..28], 0x600, .little); // PointerToRelocations
-    std.mem.writeInt(u16, sh_buf[32..34], 3, .little); // NumberOfRelocations
-    // Flags: CNT_CODE | MEM_EXECUTE | MEM_READ | ALIGN_16BYTES (0x00500000)
+    std.mem.writeInt(u32, sh_buf[8..12], 0x120, .little);
+    std.mem.writeInt(u32, sh_buf[12..16], 0x1000, .little);
+    std.mem.writeInt(u32, sh_buf[16..20], 0x200, .little);
+    std.mem.writeInt(u32, sh_buf[20..24], 0x400, .little);
+    std.mem.writeInt(u32, sh_buf[24..28], 0x600, .little);
+    std.mem.writeInt(u16, sh_buf[32..34], 3, .little);
     const flags = section_flags.CNT_CODE | section_flags.MEM_EXECUTE | section_flags.MEM_READ | 0x00500000;
     std.mem.writeInt(u32, sh_buf[36..40], flags, .little);
 
@@ -829,15 +990,8 @@ test "parse 40-byte COFF section header" {
 }
 
 test "resolve long COFF section name from string table" {
-    var sh_buf: [40]u8 = undefined;
-    @memset(&sh_buf, 0);
-
-    // Write slash followed by offset 4: "/4"
-    @memcpy(sh_buf[0..2], "/4");
-    std.mem.writeInt(u32, sh_buf[36..40], section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ, .little);
-
     const sh = SectionHeader{
-        .raw_name = sh_buf[0..8].*,
+        .raw_name = [_]u8{ '/', '4', 0, 0, 0, 0, 0, 0 },
         .virtual_size = 0,
         .virtual_address = 0,
         .size_of_raw_data = 64,
@@ -849,9 +1003,7 @@ test "resolve long COFF section name from string table" {
         .characteristics = section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ,
     };
 
-    // Mock string table: first 4 bytes are table size (e.g. 24 bytes), followed by strings
     const strtab_mock = "\x18\x00\x00\x00.very_long_section_name\x00";
-
     const name = try sh.getName(strtab_mock);
     try std.testing.expectEqualStrings(".very_long_section_name", name);
 }
@@ -876,4 +1028,104 @@ test "retrieve COFF section raw data bytes" {
 
     const data = try sh.getData(&file_mock);
     try std.testing.expectEqualStrings("windows_obj_data", data);
+}
+
+test "parse 18-byte inline COFF symbol entry" {
+    var sym_buf: [18]u8 = undefined;
+    @memset(&sym_buf, 0);
+
+    @memcpy(sym_buf[0..5], "_main");
+    std.mem.writeInt(u32, sym_buf[8..12], 0x10, .little); // Value: 0x10
+    std.mem.writeInt(i16, sym_buf[12..14], 1, .little); // Section 1 (.text)
+    std.mem.writeInt(u16, sym_buf[14..16], 0x20, .little); // Type: Function (0x20)
+    sym_buf[16] = 2; // StorageClass: External (2)
+    sym_buf[17] = 0; // Aux symbols: 0
+
+    const hdr = Header{
+        .is_pe = false,
+        .machine = .x86_64,
+        .section_count = 1,
+        .time_date_stamp = 0,
+        .symbol_table_offset = 0,
+        .symbol_count = 1,
+        .size_of_optional_header = 0,
+        .characteristics_flags = 0,
+        .section_headers_offset = 0,
+        .optional_header = null,
+    };
+
+    const sym = try hdr.parseSymbol(&sym_buf, 0);
+
+    try std.testing.expectEqualStrings("_main", try sym.getName(""));
+    try std.testing.expectEqual(@as(u32, 0x10), sym.value);
+    try std.testing.expectEqual(@as(i16, 1), sym.section_number);
+    try std.testing.expect(sym.isExternal());
+    try std.testing.expect(sym.isFunction());
+    try std.testing.expect(!sym.isUndefined());
+    try std.testing.expect(!sym.isCommon());
+    try std.testing.expect(!sym.isAbsolute());
+    try std.testing.expectEqualStrings("EXTERNAL", sym.storage_class.name());
+}
+
+test "parse COFF symbol with long name referencing string table" {
+    var sym_buf: [18]u8 = undefined;
+    @memset(&sym_buf, 0);
+
+    // First 4 bytes are 0, next 4 bytes are string table offset (4)
+    std.mem.writeInt(u32, sym_buf[0..4], 0, .little);
+    std.mem.writeInt(u32, sym_buf[4..8], 4, .little);
+    std.mem.writeInt(u32, sym_buf[8..12], 0, .little);
+    std.mem.writeInt(i16, sym_buf[12..14], SpecialSection.UNDEFINED, .little); // Section 0
+    std.mem.writeInt(u16, sym_buf[14..16], 0x20, .little);
+    sym_buf[16] = 2; // External
+    sym_buf[17] = 0;
+
+    const hdr = Header{
+        .is_pe = false,
+        .machine = .x86_64,
+        .section_count = 1,
+        .time_date_stamp = 0,
+        .symbol_table_offset = 0,
+        .symbol_count = 1,
+        .size_of_optional_header = 0,
+        .characteristics_flags = 0,
+        .section_headers_offset = 0,
+        .optional_header = null,
+    };
+
+    const sym = try hdr.parseSymbol(&sym_buf, 0);
+    const strtab_mock = "\x20\x00\x00\x00MyVeryLongExportedFunctionName\x00";
+
+    const name = try sym.getName(strtab_mock);
+    try std.testing.expectEqualStrings("MyVeryLongExportedFunctionName", name);
+    try std.testing.expect(sym.isUndefined());
+    try std.testing.expect(!sym.isCommon());
+}
+
+test "parse COFF common and absolute symbols" {
+    // Common symbol: section 0, value > 0 (size in bytes)
+    const common_sym = Symbol{
+        .raw_name = [_]u8{ 'g', '_', 'b', 'u', 'f', 0, 0, 0 },
+        .value = 1024,
+        .section_number = SpecialSection.UNDEFINED,
+        .sym_type = 0,
+        .storage_class = .external,
+        .num_aux_symbols = 0,
+    };
+
+    try std.testing.expect(common_sym.isCommon());
+    try std.testing.expect(!common_sym.isUndefined());
+
+    // Absolute symbol: section -1
+    const abs_sym = Symbol{
+        .raw_name = [_]u8{ 'M', 'A', 'X', '_', 'S', 'Z', 0, 0 },
+        .value = 4096,
+        .section_number = SpecialSection.ABSOLUTE,
+        .sym_type = 0,
+        .storage_class = .external,
+        .num_aux_symbols = 0,
+    };
+
+    try std.testing.expect(abs_sym.isAbsolute());
+    try std.testing.expect(!abs_sym.isUndefined());
 }
