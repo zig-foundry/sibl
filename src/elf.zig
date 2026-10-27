@@ -1,7 +1,7 @@
-//! Phase 2.1 & 2.2: ELF Header and Section Header Table Parsing.
+//! Phase 2.1, 2.2, & 2.3: ELF Header, Section Table, and Symbol Table Parsers.
 //!
-//! Provides zero-copy parsing for ELF headers and section headers
-//! across 32-bit, 64-bit, little-endian, and big-endian targets.
+//! Provides zero-copy parsing for headers, sections, and symbols across
+//! 32-bit, 64-bit, little-endian, and big-endian targets.
 
 const std = @import("std");
 
@@ -93,22 +93,23 @@ pub const OsAbi = enum(u8) {
 /// Section type identifying section contents and semantics (sh_type).
 pub const SectionType = enum(u32) {
     null = 0,
-    progbits = 1, // Program code or initialized data
-    symtab = 2, // Linker symbol table
-    strtab = 3, // String table
-    rela = 4, // Relocation entries with explicit addends
-    hash = 5, // Symbol hash table
-    dynamic = 6, // Dynamic linking information
-    note = 7, // Information notes
-    nobits = 8, // Uninitialized data (.bss)
-    rel = 9, // Relocation entries without addends
-    shlib = 10, // Reserved
-    dynsym = 11, // Dynamic linker symbol table
-    init_array = 14, // Array of constructors
-    fini_array = 15, // Array of destructors
-    preinit_array = 16, // Array of pre-constructors
-    group = 17, // Section group
-    symtab_shndx = 18, // Extended section indices for symbol table
+    progbits = 1,
+    symtab = 2,
+    strtab = 3,
+    rela = 4,
+    hash = 5,
+    dynamic = 6,
+    note = 7,
+    nobits = 8,
+    rel = 9,
+    shlib = 10,
+    dynsym = 11,
+    init_array = 14,
+    fini_array = 15,
+    preinit_array = 16,
+    group = 17,
+    symtab_shndx = 18,
+    relr = 19,
 
     // Android-specific sections
     android_rel = 0x60000001,
@@ -128,7 +129,6 @@ pub const SectionType = enum(u32) {
 
     _,
 
-    /// Safe string conversion that will never panic on unknown or OS-specific section types.
     pub fn name(self: SectionType) []const u8 {
         return switch (self) {
             .null => "null",
@@ -148,6 +148,7 @@ pub const SectionType = enum(u32) {
             .preinit_array => "preinit_array",
             .group => "group",
             .symtab_shndx => "symtab_shndx",
+            .relr => "relr",
             .android_rel => "android_rel",
             .android_rela => "android_rela",
             .gnu_attributes => "gnu_attributes",
@@ -165,19 +166,132 @@ pub const SectionType = enum(u32) {
 
 /// Section attribute flags (sh_flags bitmask).
 pub const flags = struct {
-    pub const WRITE: u64 = 1 << 0; // Writable at runtime
-    pub const ALLOC: u64 = 1 << 1; // Occupies memory during execution
-    pub const EXECINSTR: u64 = 1 << 2; // Executable machine instructions
-    pub const MERGE: u64 = 1 << 4; // Might be merged to eliminate duplication
-    pub const STRINGS: u64 = 1 << 5; // Contains null-terminated strings
-    pub const INFO_LINK: u64 = 1 << 6; // sh_info holds section header table index
-    pub const LINK_ORDER: u64 = 1 << 7; // Preserve order after combining
-    pub const OS_NONCONFORMING: u64 = 1 << 8; // OS-specific processing required
-    pub const GROUP: u64 = 1 << 9; // Section is member of a group
-    pub const TLS: u64 = 1 << 10; // Holds thread-local data
+    pub const WRITE: u64 = 1 << 0;
+    pub const ALLOC: u64 = 1 << 1;
+    pub const EXECINSTR: u64 = 1 << 2;
+    pub const MERGE: u64 = 1 << 4;
+    pub const STRINGS: u64 = 1 << 5;
+    pub const INFO_LINK: u64 = 1 << 6;
+    pub const LINK_ORDER: u64 = 1 << 7;
+    pub const OS_NONCONFORMING: u64 = 1 << 8;
+    pub const GROUP: u64 = 1 << 9;
+    pub const TLS: u64 = 1 << 10;
 };
 
-/// Errors encountered while reading ELF structures.
+// === Symbol Table Enums and Types ===
+
+/// Symbol binding rules (STB_*).
+pub const SymbolBinding = enum(u4) {
+    local = 0,
+    global = 1,
+    weak = 2,
+    _,
+
+    pub fn name(self: SymbolBinding) []const u8 {
+        return switch (self) {
+            .local => "LOCAL",
+            .global => "GLOBAL",
+            .weak => "WEAK",
+            _ => "UNKNOWN",
+        };
+    }
+};
+
+/// Symbol type category (STT_*).
+pub const SymbolType = enum(u4) {
+    notype = 0,
+    object = 1, // Data variable
+    func = 2, // Executable function
+    section = 3, // Section reference
+    file = 4, // Source filename
+    common = 5, // Unallocated common block
+    tls = 6, // Thread-local storage entity
+    gnu_ifunc = 10, // Indirect function resolver
+    _,
+
+    pub fn name(self: SymbolType) []const u8 {
+        return switch (self) {
+            .notype => "NOTYPE",
+            .object => "OBJECT",
+            .func => "FUNC",
+            .section => "SECTION",
+            .file => "FILE",
+            .common => "COMMON",
+            .tls => "TLS",
+            .gnu_ifunc => "IFUNC",
+            _ => "UNKNOWN",
+        };
+    }
+};
+
+/// Symbol visibility flags (STV_*).
+pub const SymbolVisibility = enum(u2) {
+    default = 0,
+    internal = 1,
+    hidden = 2,
+    protected = 3,
+
+    pub fn name(self: SymbolVisibility) []const u8 {
+        return switch (self) {
+            .default => "DEFAULT",
+            .internal => "INTERNAL",
+            .hidden => "HIDDEN",
+            .protected => "PROTECTED",
+        };
+    }
+};
+
+/// Special section indices reserved for symbol definitions (SHN_*).
+pub const SpecialSectionIndex = struct {
+    pub const UNDEF: u16 = 0;
+    pub const LORESERVE: u16 = 0xff00;
+    pub const ABS: u16 = 0xfff1;
+    pub const COMMON: u16 = 0xfff2;
+    pub const XINDEX: u16 = 0xffff;
+};
+
+/// Normalized symbol representation for both 32-bit and 64-bit ELF symbols.
+pub const Symbol = struct {
+    /// Byte offset into the linked string table (.strtab or .dynstr)
+    name_offset: u32,
+    /// Symbol address or section offset
+    value: u64,
+    /// Size of the symbol entity in bytes
+    size: u64,
+    /// Symbol binding (local, global, weak)
+    binding: SymbolBinding,
+    /// Symbol type (func, object, section, etc.)
+    sym_type: SymbolType,
+    /// Symbol visibility rule
+    visibility: SymbolVisibility,
+    /// Section index defining this symbol (or SHN_UNDEF if undefined)
+    shndx: u16,
+
+    /// Returns true if this symbol is undefined and needs to be resolved by the linker.
+    pub fn isUndefined(self: Symbol) bool {
+        return self.shndx == SpecialSectionIndex.UNDEF;
+    }
+
+    /// Returns true if this symbol has an absolute value not tied to any section.
+    pub fn isAbsolute(self: Symbol) bool {
+        return self.shndx == SpecialSectionIndex.ABS;
+    }
+
+    /// Extract symbol name string from the given string table bytes.
+    pub fn getName(self: Symbol, strtab_bytes: []const u8) SectionError![:0]const u8 {
+        if (self.name_offset >= strtab_bytes.len) {
+            return error.StringTableOutOfBounds;
+        }
+
+        const slice = strtab_bytes[self.name_offset..];
+        const len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
+
+        return slice[0..len :0];
+    }
+};
+
+// === Error Sets ===
+
 pub const HeaderError = error{
     TruncatedHeader,
     InvalidMagic,
@@ -193,48 +307,40 @@ pub const SectionError = error{
     StringTableOutOfBounds,
 };
 
+pub const SymbolError = error{
+    TruncatedSymbolTable,
+    InvalidSymbolIndex,
+    InvalidSymbolEntrySize,
+    StringTableOutOfBounds,
+};
+
 // === Section Header Representation ===
 
 /// Normalized section header representation for 32-bit and 64-bit ELF sections.
 pub const SectionHeader = struct {
-    /// Byte offset into the section header string table (.shstrtab)
     name_offset: u32,
-    /// Type of section
     sh_type: SectionType,
-    /// Bitmask of section attributes
     sh_flags: u64,
-    /// Virtual memory address where section should load (0 if not loaded)
     addr: u64,
-    /// Byte offset in the file where section raw data begins
     offset: u64,
-    /// Size of the section in bytes
     size: u64,
-    /// Section header table index link (meaning depends on section type)
-    link: u32,
-    /// Extra information (e.g. symbol index or relocation target section)
-    info: u32,
-    /// Address alignment constraints (must be a power of two)
+    link: u32, // For symtab/dynsym, points to the associated strtab section index
+    info: u32, // For symtab, contains index of first non-local symbol
     addralign: u64,
-    /// Size of each entry if the section holds a fixed-size entry table
     entsize: u64,
 
-    /// Returns true if this section occupies memory during program execution.
     pub fn isAlloc(self: SectionHeader) bool {
         return (self.sh_flags & flags.ALLOC) != 0;
     }
 
-    /// Returns true if memory for this section is writable at runtime.
     pub fn isWritable(self: SectionHeader) bool {
         return (self.sh_flags & flags.WRITE) != 0;
     }
 
-    /// Returns true if this section contains executable instructions.
     pub fn isExecutable(self: SectionHeader) bool {
         return (self.sh_flags & flags.EXECINSTR) != 0;
     }
 
-    /// Returns a zero-copy slice of the raw section data from file bytes.
-    /// Returns an empty slice for NOBITS (.bss) sections as they have no file bytes.
     pub fn getData(self: SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
         if (self.sh_type == .nobits or self.size == 0) {
             return &.{};
@@ -253,7 +359,6 @@ pub const SectionHeader = struct {
         return file_bytes[start..end];
     }
 
-    /// Extract section name string from the section header string table.
     pub fn getName(self: SectionHeader, shstrtab_data: []const u8) SectionError![:0]const u8 {
         if (self.name_offset >= shstrtab_data.len) {
             return error.StringTableOutOfBounds;
@@ -263,6 +368,74 @@ pub const SectionHeader = struct {
         const len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
 
         return slice[0..len :0];
+    }
+
+    /// Calculate how many symbol entries are in this section table.
+    pub fn getSymbolCount(self: SectionHeader, class: Class) SymbolError!usize {
+        const expected_entry_size: u64 = switch (class) {
+            .elf64 => 24,
+            .elf32 => 16,
+            .none => return error.InvalidSymbolEntrySize,
+        };
+
+        const entry_size = if (self.entsize != 0) self.entsize else expected_entry_size;
+        if (entry_size != expected_entry_size) {
+            return error.InvalidSymbolEntrySize;
+        }
+
+        return @intCast(self.size / entry_size);
+    }
+
+    /// Parse a single symbol entry from a symbol table section.
+    pub fn parseSymbol(
+        self: SectionHeader,
+        file_bytes: []const u8,
+        class: Class,
+        endian: std.builtin.Endian,
+        sym_index: usize,
+    ) SymbolError!Symbol {
+        const count = try self.getSymbolCount(class);
+        if (sym_index >= count) {
+            return error.InvalidSymbolIndex;
+        }
+
+        const entry_size: usize = if (class == .elf64) 24 else 16;
+        const sym_offset = self.offset + (@as(u64, sym_index) * entry_size);
+        const sym_end = sym_offset + entry_size;
+
+        if (sym_end > file_bytes.len) {
+            return error.TruncatedSymbolTable;
+        }
+
+        const start: usize = @intCast(sym_offset);
+        const end: usize = @intCast(sym_end);
+        const bytes = file_bytes[start..end];
+
+        return switch (class) {
+            .elf64 => parseSymbol64(bytes, endian),
+            .elf32 => parseSymbol32(bytes, endian),
+            .none => error.InvalidSymbolEntrySize,
+        };
+    }
+
+    /// Parse all symbols from this table into an allocated slice.
+    pub fn parseAllSymbols(
+        self: SectionHeader,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+        class: Class,
+        endian: std.builtin.Endian,
+    ) (SymbolError || std.mem.Allocator.Error)![]Symbol {
+        const count = try self.getSymbolCount(class);
+        const symbols = try allocator.alloc(Symbol, count);
+        errdefer allocator.free(symbols);
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            symbols[i] = try self.parseSymbol(file_bytes, class, endian, i);
+        }
+
+        return symbols;
     }
 };
 
@@ -287,7 +460,6 @@ pub const Header = struct {
     shnum: u16,
     shstrndx: u16,
 
-    /// Parse an ELF header from a raw byte slice.
     pub fn parse(bytes: []const u8) HeaderError!Header {
         if (bytes.len < 16) return error.TruncatedHeader;
 
@@ -321,7 +493,6 @@ pub const Header = struct {
         };
     }
 
-    /// Parse a single section header entry at the given index.
     pub fn parseSectionHeader(self: Header, bytes: []const u8, index: usize) SectionError!SectionHeader {
         if (index >= self.shnum) {
             return error.InvalidSectionIndex;
@@ -351,7 +522,6 @@ pub const Header = struct {
         };
     }
 
-    /// Parse all section headers into an allocated slice.
     pub fn parseAllSectionHeaders(
         self: Header,
         allocator: std.mem.Allocator,
@@ -368,7 +538,6 @@ pub const Header = struct {
         return sections;
     }
 
-    /// Retrieve the raw bytes of the section header string table (.shstrtab).
     pub fn getSectionStringTable(self: Header, bytes: []const u8) SectionError![]const u8 {
         if (self.shstrndx >= self.shnum) {
             return error.InvalidSectionIndex;
@@ -485,6 +654,42 @@ pub const Header = struct {
     }
 };
 
+// --- Symbol Parser Helpers ---
+
+fn parseSymbol64(bytes: []const u8, endian: std.builtin.Endian) SymbolError!Symbol {
+    if (bytes.len < 24) return error.TruncatedSymbolTable;
+
+    const info_byte = bytes[4];
+    const other_byte = bytes[5];
+
+    return .{
+        .name_offset = std.mem.readInt(u32, bytes[0..4], endian),
+        .binding = @fromBackingInt(@intCast(@as(u4, @truncate(info_byte >> 4)))),
+        .sym_type = @fromBackingInt(@intCast(@as(u4, @truncate(info_byte & 0x0F)))),
+        .visibility = @fromBackingInt(@intCast(@as(u2, @truncate(other_byte & 0x03)))),
+        .shndx = std.mem.readInt(u16, bytes[6..8], endian),
+        .value = std.mem.readInt(u64, bytes[8..16], endian),
+        .size = std.mem.readInt(u64, bytes[16..24], endian),
+    };
+}
+
+fn parseSymbol32(bytes: []const u8, endian: std.builtin.Endian) SymbolError!Symbol {
+    if (bytes.len < 16) return error.TruncatedSymbolTable;
+
+    const info_byte = bytes[12];
+    const other_byte = bytes[13];
+
+    return .{
+        .name_offset = std.mem.readInt(u32, bytes[0..4], endian),
+        .value = std.mem.readInt(u32, bytes[4..8], endian),
+        .size = std.mem.readInt(u32, bytes[8..12], endian),
+        .binding = @fromBackingInt(@intCast(@as(u4, @truncate(info_byte >> 4)))),
+        .sym_type = @fromBackingInt(@intCast(@as(u4, @truncate(info_byte & 0x0F)))),
+        .visibility = @fromBackingInt(@intCast(@as(u2, @truncate(other_byte & 0x03)))),
+        .shndx = std.mem.readInt(u16, bytes[14..16], endian),
+    };
+}
+
 // === Unit Tests ===
 
 test "reject file with invalid magic bytes" {
@@ -527,14 +732,14 @@ test "parse 64-bit little-endian ELF relocatable header" {
     std.mem.writeInt(u32, hdr_buf[20..24], 1, .little);
     std.mem.writeInt(u64, hdr_buf[24..32], 0, .little);
     std.mem.writeInt(u64, hdr_buf[32..40], 0, .little);
-    std.mem.writeInt(u64, hdr_buf[40..48], 0x1000, .little); // e_shoff
+    std.mem.writeInt(u64, hdr_buf[40..48], 0x1000, .little);
     std.mem.writeInt(u32, hdr_buf[48..52], 0, .little);
     std.mem.writeInt(u16, hdr_buf[52..54], 64, .little);
     std.mem.writeInt(u16, hdr_buf[54..56], 0, .little);
     std.mem.writeInt(u16, hdr_buf[56..58], 0, .little);
-    std.mem.writeInt(u16, hdr_buf[58..60], 64, .little); // e_shentsize
-    std.mem.writeInt(u16, hdr_buf[60..62], 12, .little); // e_shnum
-    std.mem.writeInt(u16, hdr_buf[62..64], 11, .little); // e_shstrndx
+    std.mem.writeInt(u16, hdr_buf[58..60], 64, .little);
+    std.mem.writeInt(u16, hdr_buf[60..62], 12, .little);
+    std.mem.writeInt(u16, hdr_buf[62..64], 11, .little);
 
     const parsed = try Header.parse(&hdr_buf);
 
@@ -590,16 +795,16 @@ test "parse 64-bit ELF section header" {
     var sh_buf: [64]u8 = undefined;
     @memset(&sh_buf, 0);
 
-    std.mem.writeInt(u32, sh_buf[0..4], 12, .little); // sh_name
+    std.mem.writeInt(u32, sh_buf[0..4], 12, .little);
     std.mem.writeInt(u32, sh_buf[4..8], 1, .little); // SHT_PROGBITS
-    std.mem.writeInt(u64, sh_buf[8..16], flags.ALLOC | flags.EXECINSTR, .little); // flags
-    std.mem.writeInt(u64, sh_buf[16..24], 0x400000, .little); // addr
-    std.mem.writeInt(u64, sh_buf[24..32], 0x100, .little); // offset
-    std.mem.writeInt(u64, sh_buf[32..40], 0x48, .little); // size
-    std.mem.writeInt(u32, sh_buf[40..44], 0, .little); // link
-    std.mem.writeInt(u32, sh_buf[44..48], 0, .little); // info
-    std.mem.writeInt(u64, sh_buf[48..56], 16, .little); // addralign
-    std.mem.writeInt(u64, sh_buf[56..64], 0, .little); // entsize
+    std.mem.writeInt(u64, sh_buf[8..16], flags.ALLOC | flags.EXECINSTR, .little);
+    std.mem.writeInt(u64, sh_buf[16..24], 0x400000, .little);
+    std.mem.writeInt(u64, sh_buf[24..32], 0x100, .little);
+    std.mem.writeInt(u64, sh_buf[32..40], 0x48, .little);
+    std.mem.writeInt(u32, sh_buf[40..44], 0, .little);
+    std.mem.writeInt(u32, sh_buf[44..48], 0, .little);
+    std.mem.writeInt(u64, sh_buf[48..56], 16, .little);
+    std.mem.writeInt(u64, sh_buf[56..64], 0, .little);
 
     var hdr: Header = undefined;
     hdr.class = .elf64;
@@ -625,7 +830,7 @@ test "parse 32-bit ELF section header" {
     var sh_buf: [40]u8 = undefined;
     @memset(&sh_buf, 0);
 
-    std.mem.writeInt(u32, sh_buf[0..4], 5, .big); // sh_name
+    std.mem.writeInt(u32, sh_buf[0..4], 5, .big);
     std.mem.writeInt(u32, sh_buf[4..8], 8, .big); // SHT_NOBITS (.bss)
     std.mem.writeInt(u32, sh_buf[8..12], @as(u32, @truncate(flags.ALLOC | flags.WRITE)), .big);
     std.mem.writeInt(u32, sh_buf[12..16], 0x20000, .big);
@@ -749,4 +954,77 @@ test "section type name handles custom and unknown integer values without panick
 
     const unknown_sec: SectionType = @fromBackingInt(@intCast(0x12345678));
     try std.testing.expectEqualStrings("unknown", unknown_sec.name());
+}
+
+test "parse 64-bit ELF symbol entry" {
+    var sym_buf: [24]u8 = undefined;
+    @memset(&sym_buf, 0);
+
+    std.mem.writeInt(u32, sym_buf[0..4], 14, .little); // st_name
+    sym_buf[4] = (1 << 4) | 2; // STB_GLOBAL (1) | STT_FUNC (2)
+    sym_buf[5] = 0; // STV_DEFAULT
+    std.mem.writeInt(u16, sym_buf[6..8], 1, .little); // st_shndx (section 1: .text)
+    std.mem.writeInt(u64, sym_buf[8..16], 0x401000, .little); // st_value
+    std.mem.writeInt(u64, sym_buf[16..24], 128, .little); // st_size
+
+    const sym = try parseSymbol64(&sym_buf, .little);
+
+    try std.testing.expectEqual(@as(u32, 14), sym.name_offset);
+    try std.testing.expectEqual(SymbolBinding.global, sym.binding);
+    try std.testing.expectEqual(SymbolType.func, sym.sym_type);
+    try std.testing.expectEqual(SymbolVisibility.default, sym.visibility);
+    try std.testing.expectEqual(@as(u16, 1), sym.shndx);
+    try std.testing.expectEqual(@as(u64, 0x401000), sym.value);
+    try std.testing.expectEqual(@as(u64, 128), sym.size);
+    try std.testing.expect(!sym.isUndefined());
+    try std.testing.expect(!sym.isAbsolute());
+}
+
+test "parse 32-bit ELF symbol entry" {
+    var sym_buf: [16]u8 = undefined;
+    @memset(&sym_buf, 0);
+
+    std.mem.writeInt(u32, sym_buf[0..4], 8, .big); // st_name
+    std.mem.writeInt(u32, sym_buf[4..8], 0x20004, .big); // st_value
+    std.mem.writeInt(u32, sym_buf[8..12], 4, .big); // st_size
+    sym_buf[12] = (2 << 4) | 1; // STB_WEAK (2) | STT_OBJECT (1)
+    sym_buf[13] = 2; // STV_HIDDEN (2)
+    std.mem.writeInt(u16, sym_buf[14..16], SpecialSectionIndex.UNDEF, .big); // undefined
+
+    const sym = try parseSymbol32(&sym_buf, .big);
+
+    try std.testing.expectEqual(@as(u32, 8), sym.name_offset);
+    try std.testing.expectEqual(@as(u64, 0x20004), sym.value);
+    try std.testing.expectEqual(@as(u64, 4), sym.size);
+    try std.testing.expectEqual(SymbolBinding.weak, sym.binding);
+    try std.testing.expectEqual(SymbolType.object, sym.sym_type);
+    try std.testing.expectEqual(SymbolVisibility.hidden, sym.visibility);
+    try std.testing.expect(sym.isUndefined());
+}
+
+test "symbol name extraction from strtab bytes" {
+    const strtab = "\x00main\x00printf\x00global_counter\x00";
+
+    const sym_main = Symbol{
+        .name_offset = 1,
+        .value = 0x4000,
+        .size = 32,
+        .binding = .global,
+        .sym_type = .func,
+        .visibility = .default,
+        .shndx = 1,
+    };
+
+    const sym_printf = Symbol{
+        .name_offset = 6,
+        .value = 0,
+        .size = 0,
+        .binding = .global,
+        .sym_type = .func,
+        .visibility = .default,
+        .shndx = SpecialSectionIndex.UNDEF,
+    };
+
+    try std.testing.expectEqualStrings("main", try sym_main.getName(strtab));
+    try std.testing.expectEqualStrings("printf", try sym_printf.getName(strtab));
 }
