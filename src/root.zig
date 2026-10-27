@@ -28,6 +28,9 @@ pub const strtab = @import("strtab.zig");
 /// PE and COFF parsing for Windows targets (Phase 3.1 - 3.5).
 pub const coff = @import("coff.zig");
 
+/// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1).
+pub const macho = @import("macho.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -92,6 +95,12 @@ pub const CoffSectionPermissions = coff.SectionPermissions;
 pub const coff_characteristics = coff.characteristics;
 pub const coff_section_flags = coff.section_flags;
 
+// Mach-O types
+pub const MachoHeader = macho.Header;
+pub const MachoCpuType = macho.CpuType;
+pub const MachoFileType = macho.FileType;
+pub const macho_flags = macho.flags;
+
 // === Test Suite Runner ===
 
 test {
@@ -102,4 +111,5 @@ test {
     _ = elf;
     _ = strtab;
     _ = coff;
+    _ = macho;
 }

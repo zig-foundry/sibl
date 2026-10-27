@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
         };
         defer mapped.deinit(io);
 
-        // Check if file is ELF format
+        // 1. Check if file is ELF format
         if (mapped.data.len >= 4 and std.mem.eql(u8, mapped.data[0..4], &sibl.elf.MAGIC)) {
             const elf_hdr = sibl.elf.Header.parse(mapped.data) catch |err| {
                 std.debug.print("sibl: error: failed to parse ELF header for '{s}': {s}\n", .{ file_path, @errorName(err) });
@@ -103,8 +103,8 @@ pub fn main(init: std.process.Init) !void {
                 });
             }
         }
-        // Check if file is PE / COFF format
-        else if (sibl.coff.Header.parse(mapped.data)) |coff_hdr| {
+        // 2. Check if file is PE / COFF format
+        else if (sibl.coff.Header.parse(mapped.data) catch null) |coff_hdr| {
             if (coff_hdr.is_pe) {
                 const opt = coff_hdr.optional_header.?;
                 std.debug.print("    - {s} [PE {s} {s}] ({d} sections, entry=0x{x}, base=0x{x}, {s})\n", .{
@@ -125,7 +125,6 @@ pub fn main(init: std.process.Init) !void {
                 });
             }
 
-            // Phase 3.2 & 3.5: Parse sections, flags, kinds, and dollar-sign grouping
             const strtab_bytes = coff_hdr.getStringTable(mapped.data);
             const coff_sections = coff_hdr.parseAllSectionHeaders(arena, mapped.data) catch continue;
 
@@ -158,61 +157,20 @@ pub fn main(init: std.process.Init) !void {
                         rel_count,
                     });
                 }
-
-                // Phase 3.4: Display relocations belonging to this section
-                if (rel_count > 0) {
-                    const print_limit = @min(rel_count, 3);
-                    var r_idx: usize = 0;
-                    while (r_idx < print_limit) : (r_idx += 1) {
-                        const r = csh.parseRelocation(mapped.data, r_idx) catch continue;
-                        var sym_name: []const u8 = "<none>";
-                        if (r.symbol_table_index < coff_hdr.symbol_count) {
-                            if (coff_hdr.parseSymbol(mapped.data, r.symbol_table_index)) |sym| {
-                                sym_name = sym.getName(strtab_bytes) catch "<unnamed>";
-                            } else |_| {}
-                        }
-
-                        std.debug.print("          -> ({d:2}) off=0x{x:<8} type={s:<16} sym=[{d:4}] {s:<20}\n", .{
-                            r_idx,
-                            r.virtual_address,
-                            r.typeName(coff_hdr.machine),
-                            r.symbol_table_index,
-                            if (sym_name.len == 0) "<empty>" else sym_name,
-                        });
-                    }
-
-                    if (rel_count > print_limit) {
-                        std.debug.print("          -> ... and {d} more relocations\n", .{rel_count - print_limit});
-                    }
-                }
             }
-
-            // Phase 3.3: Symbols
-            if (coff_hdr.symbol_count > 0) {
-                std.debug.print("          -> COFF Symbol Table: {d} symbols:\n", .{coff_hdr.symbol_count});
-                const print_limit = @min(coff_hdr.symbol_count, 6);
-                var sym_idx: usize = 0;
-                while (sym_idx < print_limit) {
-                    const sym = coff_hdr.parseSymbol(mapped.data, sym_idx) catch break;
-                    const sym_name = sym.getName(strtab_bytes) catch "<unnamed>";
-
-                    std.debug.print("             ({d:2}) {s:<24} val=0x{x:<8} sec={d:<3} class={s:<10} aux={d}\n", .{
-                        sym_idx,
-                        sym_name,
-                        sym.value,
-                        sym.section_number,
-                        sym.storage_class.name(),
-                        sym.num_aux_symbols,
-                    });
-
-                    sym_idx += 1 + @as(usize, sym.num_aux_symbols);
-                }
-
-                if (coff_hdr.symbol_count > print_limit) {
-                    std.debug.print("             ... and more symbols\n", .{});
-                }
-            }
-        } else |_| {
+        }
+        // 3. Check if file is Mach-O format
+        else if (sibl.macho.Header.parse(mapped.data) catch null) |macho_hdr| {
+            std.debug.print("    - {s} [Mach-O {s} {s} {s}] ({d} load commands, {d} bytes, pie={})\n", .{
+                file_path,
+                if (macho_hdr.is_64bit) "64-bit" else "32-bit",
+                macho_hdr.cpu_type.name(),
+                macho_hdr.file_type.name(),
+                macho_hdr.ncmds,
+                macho_hdr.sizeofcmds,
+                macho_hdr.isPie(),
+            });
+        } else {
             std.debug.print("    - {s} ({d} bytes mapped, non-binary/unknown)\n", .{ file_path, mapped.size });
         }
     }
