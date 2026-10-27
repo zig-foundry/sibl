@@ -25,6 +25,9 @@ pub const elf = @import("elf.zig");
 /// String table reader and deduplicating builder (Phase 2.4).
 pub const strtab = @import("strtab.zig");
 
+/// PE and COFF parsing for Windows targets (Phase 3.1).
+pub const coff = @import("coff.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -71,6 +74,14 @@ pub const RelocationError = elf.RelocationError;
 pub const StringTableReader = strtab.StringTableReader;
 pub const StringTableBuilder = strtab.StringTableBuilder;
 
+// COFF / PE types
+pub const CoffHeader = coff.Header;
+pub const CoffMachine = coff.Machine;
+pub const CoffOptionalHeader = coff.OptionalHeader;
+pub const CoffSubsystem = coff.Subsystem;
+pub const CoffDataDirectory = coff.DataDirectory;
+pub const coff_characteristics = coff.characteristics;
+
 // === Test Suite Runner ===
 
 test {
@@ -80,4 +91,5 @@ test {
     _ = file;
     _ = elf;
     _ = strtab;
+    _ = coff;
 }
