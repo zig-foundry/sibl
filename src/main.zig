@@ -124,6 +124,24 @@ pub fn main(init: std.process.Init) !void {
                     coff_hdr.symbol_count,
                 });
             }
+
+            // Phase 3.2: Parse and print COFF sections
+            const strtab_bytes = coff_hdr.getStringTable(mapped.data);
+            const coff_sections = coff_hdr.parseAllSectionHeaders(arena, mapped.data) catch continue;
+
+            for (coff_sections, 0..) |csh, idx| {
+                const name = csh.getName(strtab_bytes) catch "<unnamed>";
+                std.debug.print("      [{d:2}] {s:<24} raw_sz=0x{x:<6} virt_sz=0x{x:<6} align={d:<4} flags={s}{s}{s}\n", .{
+                    idx,
+                    name,
+                    csh.size_of_raw_data,
+                    csh.virtual_size,
+                    csh.getAlignment(),
+                    if (csh.isReadable()) "R" else "",
+                    if (csh.isWritable()) "W" else "",
+                    if (csh.isExecutable()) "X" else "",
+                });
+            }
         } else |_| {
             std.debug.print("    - {s} ({d} bytes mapped, non-binary/unknown)\n", .{ file_path, mapped.size });
         }

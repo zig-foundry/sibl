@@ -1,4 +1,4 @@
-//! Phase 3.1: DOS and COFF Header Parser for sibl.
+//! Phase 3.1 & 3.2: DOS, COFF Header, and Section Table Parser for sibl.
 //!
 //! Provides zero-copy parsing for Windows PE executables (.exe, .dll)
 //! and raw COFF relocatable object files (.obj).
@@ -50,29 +50,53 @@ pub const Machine = enum(u16) {
     }
 };
 
-/// COFF characteristics bitmask (IMAGE_FILE_*).
+/// COFF file characteristics bitmask (IMAGE_FILE_*).
 pub const characteristics = struct {
-    pub const RELOCS_STRIPPED: u16 = 0x0001; // Relocation information was stripped
-    pub const EXECUTABLE_IMAGE: u16 = 0x0002; // File is executable
-    pub const LINE_NUMS_STRIPPED: u16 = 0x0004; // Line numbers stripped
-    pub const LOCAL_SYMS_STRIPPED: u16 = 0x0008; // Local symbols stripped
-    pub const LARGE_ADDRESS_AWARE: u16 = 0x0020; // Can handle addresses > 2 GB
-    pub const BIT32_MACHINE: u16 = 0x0100; // 32-bit word architecture
-    pub const DEBUG_STRIPPED: u16 = 0x0200; // Debugging info stripped
+    pub const RELOCS_STRIPPED: u16 = 0x0001;
+    pub const EXECUTABLE_IMAGE: u16 = 0x0002;
+    pub const LINE_NUMS_STRIPPED: u16 = 0x0004;
+    pub const LOCAL_SYMS_STRIPPED: u16 = 0x0008;
+    pub const LARGE_ADDRESS_AWARE: u16 = 0x0020;
+    pub const BIT32_MACHINE: u16 = 0x0100;
+    pub const DEBUG_STRIPPED: u16 = 0x0200;
     pub const REMOVABLE_RUN_FROM_SWAP: u16 = 0x0400;
     pub const NET_RUN_FROM_SWAP: u16 = 0x0800;
-    pub const SYSTEM: u16 = 0x1000; // System file (driver)
-    pub const DLL: u16 = 0x2000; // Dynamic link library
-    pub const UP_SYSTEM_ONLY: u16 = 0x4000; // Uniprocessor machine only
+    pub const SYSTEM: u16 = 0x1000;
+    pub const DLL: u16 = 0x2000;
+    pub const UP_SYSTEM_ONLY: u16 = 0x4000;
+};
+
+/// Section characteristics bitmask (IMAGE_SCN_*).
+pub const section_flags = struct {
+    pub const TYPE_NO_PAD: u32 = 0x00000008;
+    pub const CNT_CODE: u32 = 0x00000020; // Section contains executable code
+    pub const CNT_INITIALIZED_DATA: u32 = 0x00000040; // Section contains initialized data
+    pub const CNT_UNINITIALIZED_DATA: u32 = 0x00000080; // Section contains uninitialized data (.bss)
+    pub const LNK_INFO: u32 = 0x00000200; // Section contains comments or other info
+    pub const LNK_REMOVE: u32 = 0x00000800; // Section will not become part of image
+    pub const LNK_COMDAT: u32 = 0x00001000; // Section contains COMDAT data
+    pub const GPREL: u32 = 0x00008000; // Section contains data referenced through GP
+    pub const MEM_PURGEABLE: u32 = 0x00020000;
+    pub const MEM_16BIT: u32 = 0x00020000;
+    pub const MEM_LOCKED: u32 = 0x00040000;
+    pub const MEM_PRELOAD: u32 = 0x00080000;
+    pub const LNK_NRELOC_OVFL: u32 = 0x01000000; // Section contains extended relocations
+    pub const MEM_DISCARDABLE: u32 = 0x02000000; // Section can be discarded as needed
+    pub const MEM_NOT_CACHED: u32 = 0x04000000; // Section cannot be cached
+    pub const MEM_NOT_PAGED: u32 = 0x08000000; // Section cannot be paged
+    pub const MEM_SHARED: u32 = 0x10000000; // Section can be shared in memory
+    pub const MEM_EXECUTE: u32 = 0x20000000; // Section can be executed as code
+    pub const MEM_READ: u32 = 0x40000000; // Section can be read
+    pub const MEM_WRITE: u32 = 0x80000000; // Section can be written to
 };
 
 /// Windows Subsystem types.
 pub const Subsystem = enum(u16) {
     unknown = 0,
-    native = 1, // Device drivers and native system processes
-    windows_gui = 2, // Windows GUI subsystem
-    windows_cui = 3, // Windows Console subsystem
-    posix_cui = 7, // POSIX console
+    native = 1,
+    windows_gui = 2,
+    windows_cui = 3,
+    posix_cui = 7,
     windows_ce_gui = 9,
     efi_application = 10,
     efi_boot_service_driver = 11,
@@ -140,7 +164,8 @@ pub const OptionalHeader = struct {
     data_directories: [16]DataDirectory,
 };
 
-/// Errors encountered while reading COFF and PE headers.
+// === Error Sets ===
+
 pub const Error = error{
     TruncatedHeader,
     NotCoffOrPe,
@@ -148,6 +173,125 @@ pub const Error = error{
     InvalidPeSignature,
     InvalidOptionalHeaderMagic,
     TruncatedOptionalHeader,
+};
+
+pub const SectionError = error{
+    TruncatedSectionTable,
+    InvalidSectionIndex,
+    InvalidSectionSize,
+    StringTableOutOfBounds,
+    InvalidStringOffset,
+};
+
+// === Section Header Representation ===
+
+/// Normalized representation for a 40-byte COFF / PE section header.
+pub const SectionHeader = struct {
+    /// Raw 8-byte name buffer from the header
+    raw_name: [8]u8,
+    /// Total size in memory when loaded (or 0 for object files)
+    virtual_size: u32,
+    /// Relative virtual address (RVA) in memory
+    virtual_address: u32,
+    /// Size of raw data on disk
+    size_of_raw_data: u32,
+    /// File pointer to raw data bytes
+    pointer_to_raw_data: u32,
+    /// File pointer to relocation entries
+    pointer_to_relocations: u32,
+    /// File pointer to line numbers (deprecated)
+    pointer_to_linenumbers: u32,
+    /// Number of relocation entries
+    number_of_relocations: u16,
+    /// Number of line numbers (deprecated)
+    number_of_linenumbers: u16,
+    /// Characteristics bitmask flags
+    characteristics: u32,
+
+    /// Returns true if section contains executable instructions.
+    pub fn isExecutable(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.MEM_EXECUTE) != 0;
+    }
+
+    /// Returns true if section memory is readable at runtime.
+    pub fn isReadable(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.MEM_READ) != 0;
+    }
+
+    /// Returns true if section memory is writable at runtime.
+    pub fn isWritable(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.MEM_WRITE) != 0;
+    }
+
+    /// Returns true if section contains machine code.
+    pub fn hasCode(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.CNT_CODE) != 0;
+    }
+
+    /// Returns true if section contains initialized variables.
+    pub fn hasInitializedData(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.CNT_INITIALIZED_DATA) != 0;
+    }
+
+    /// Returns true if section contains uninitialized data (.bss).
+    pub fn hasUninitializedData(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.CNT_UNINITIALIZED_DATA) != 0;
+    }
+
+    /// Returns true if this section is a COMDAT section.
+    pub fn isComdat(self: SectionHeader) bool {
+        return (self.characteristics & section_flags.LNK_COMDAT) != 0;
+    }
+
+    /// Compute byte alignment required for this section (1 to 8192 bytes).
+    pub fn getAlignment(self: SectionHeader) u32 {
+        const align_val = (self.characteristics >> 20) & 0x0F;
+        if (align_val == 0) return 16; // Default to 16 bytes if unspecified
+        if (align_val > 14) return 8192;
+        return @as(u32, 1) << @intCast(align_val - 1);
+    }
+
+    /// Extract section name string, resolving long names from the COFF string table if needed.
+    pub fn getName(self: SectionHeader, strtab_bytes: []const u8) SectionError![]const u8 {
+        // If name begins with '/', it references an offset in the string table (e.g. "/4")
+        if (self.raw_name[0] == '/') {
+            // Find null terminator or end of 8-byte field
+            const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
+            const num_str = self.raw_name[1..len];
+
+            const offset = std.fmt.parseInt(u32, num_str, 10) catch {
+                return error.InvalidStringOffset;
+            };
+
+            if (offset >= strtab_bytes.len) {
+                return error.StringTableOutOfBounds;
+            }
+
+            const slice = strtab_bytes[offset..];
+            const str_len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
+            return slice[0..str_len];
+        }
+
+        // Inline short name (up to 8 characters)
+        const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
+        return self.raw_name[0..len];
+    }
+
+    /// Retrieve raw section bytes from the file buffer.
+    pub fn getData(self: SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
+        if (self.size_of_raw_data == 0) return &.{};
+
+        const start: usize = self.pointer_to_raw_data;
+        const end: usize = std.math.add(usize, start, self.size_of_raw_data) catch {
+            return error.InvalidSectionSize;
+        };
+
+        if (end > file_bytes.len) {
+            return error.InvalidSectionSize;
+        }
+
+        return file_bytes[start..end];
+    }
 };
 
 // === Normalized COFF / PE Header ===
@@ -180,18 +324,88 @@ pub const Header = struct {
     pub fn parse(bytes: []const u8) Error!Header {
         if (bytes.len < 20) return error.TruncatedHeader;
 
-        // Check if the file starts with DOS magic ("MZ")
         if (std.mem.eql(u8, bytes[0..2], &DOS_MAGIC)) {
             return parsePeImage(bytes);
         }
 
-        // Check if it starts directly as a raw COFF relocatable object file (.obj)
         const raw_machine = std.mem.readInt(u16, bytes[0..2], .little);
         if (Machine.isKnown(raw_machine)) {
             return parseCoffObject(bytes);
         }
 
         return error.NotCoffOrPe;
+    }
+
+    /// Parse a single section header entry by index (each is 40 bytes).
+    pub fn parseSectionHeader(self: Header, file_bytes: []const u8, index: usize) SectionError!SectionHeader {
+        if (index >= self.section_count) {
+            return error.InvalidSectionIndex;
+        }
+
+        const offset: usize = self.section_headers_offset + (index * 40);
+        const end: usize = offset + 40;
+
+        if (end > file_bytes.len) {
+            return error.TruncatedSectionTable;
+        }
+
+        const sh_bytes = file_bytes[offset..end];
+        var name_buf: [8]u8 = undefined;
+        @memcpy(&name_buf, sh_bytes[0..8]);
+
+        return .{
+            .raw_name = name_buf,
+            .virtual_size = std.mem.readInt(u32, sh_bytes[8..][0..4], .little),
+            .virtual_address = std.mem.readInt(u32, sh_bytes[12..][0..4], .little),
+            .size_of_raw_data = std.mem.readInt(u32, sh_bytes[16..][0..4], .little),
+            .pointer_to_raw_data = std.mem.readInt(u32, sh_bytes[20..][0..4], .little),
+            .pointer_to_relocations = std.mem.readInt(u32, sh_bytes[24..][0..4], .little),
+            .pointer_to_linenumbers = std.mem.readInt(u32, sh_bytes[28..][0..4], .little),
+            .number_of_relocations = std.mem.readInt(u16, sh_bytes[32..][0..2], .little),
+            .number_of_linenumbers = std.mem.readInt(u16, sh_bytes[34..][0..2], .little),
+            .characteristics = std.mem.readInt(u32, sh_bytes[36..][0..4], .little),
+        };
+    }
+
+    /// Parse all section headers into an allocated slice.
+    pub fn parseAllSectionHeaders(
+        self: Header,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+    ) (SectionError || std.mem.Allocator.Error)![]SectionHeader {
+        const sections = try allocator.alloc(SectionHeader, self.section_count);
+        errdefer allocator.free(sections);
+
+        var i: usize = 0;
+        while (i < self.section_count) : (i += 1) {
+            sections[i] = try self.parseSectionHeader(file_bytes, i);
+        }
+
+        return sections;
+    }
+
+    /// Retrieve raw slice of the COFF string table.
+    /// In COFF, the string table begins immediately after the symbol table:
+    /// string_table_offset = symbol_table_offset + (symbol_count * 18).
+    pub fn getStringTable(self: Header, file_bytes: []const u8) []const u8 {
+        if (self.symbol_table_offset == 0 or self.symbol_count == 0) {
+            return &.{};
+        }
+
+        const sym_table_bytes = @as(usize, self.symbol_count) * 18;
+        const strtab_offset: usize = self.symbol_table_offset + sym_table_bytes;
+
+        // The first 4 bytes of the string table is a u32 storing its total size
+        if (strtab_offset + 4 > file_bytes.len) {
+            return &.{};
+        }
+
+        const strtab_size = std.mem.readInt(u32, file_bytes[strtab_offset..][0..4], .little);
+        if (strtab_size < 4 or strtab_offset + strtab_size > file_bytes.len) {
+            return &.{};
+        }
+
+        return file_bytes[strtab_offset .. strtab_offset + strtab_size];
     }
 
     // --- Private Parsers ---
@@ -481,14 +695,11 @@ test "parse complete Windows 64-bit PE binary with DOS stub" {
     var pe_buf: [350]u8 = undefined;
     @memset(&pe_buf, 0);
 
-    // DOS Header
     @memcpy(pe_buf[0..2], &DOS_MAGIC);
     std.mem.writeInt(u32, pe_buf[0x3C..0x40], 64, .little);
 
-    // PE Signature
     @memcpy(pe_buf[64..68], &PE_SIGNATURE);
 
-    // COFF File Header
     std.mem.writeInt(u16, pe_buf[68..70], 0x8664, .little);
     std.mem.writeInt(u16, pe_buf[70..72], 5, .little);
     std.mem.writeInt(u32, pe_buf[72..76], 123456, .little);
@@ -497,7 +708,6 @@ test "parse complete Windows 64-bit PE binary with DOS stub" {
     std.mem.writeInt(u16, pe_buf[84..86], 240, .little);
     std.mem.writeInt(u16, pe_buf[86..88], characteristics.EXECUTABLE_IMAGE | characteristics.LARGE_ADDRESS_AWARE, .little);
 
-    // Optional Header PE32+
     std.mem.writeInt(u16, pe_buf[88..90], OptionalHeaderMagic.PE32_PLUS, .little);
     pe_buf[90] = 14;
     pe_buf[91] = 0;
@@ -506,10 +716,9 @@ test "parse complete Windows 64-bit PE binary with DOS stub" {
     std.mem.writeInt(u64, pe_buf[112..120], 0x140000000, .little);
     std.mem.writeInt(u32, pe_buf[120..124], 4096, .little);
     std.mem.writeInt(u32, pe_buf[124..128], 512, .little);
-    std.mem.writeInt(u16, pe_buf[156..158], 3, .little); // windows_cui
+    std.mem.writeInt(u16, pe_buf[156..158], 3, .little);
     std.mem.writeInt(u32, pe_buf[196..200], 16, .little);
 
-    // Data Directory #1 (Import Table)
     std.mem.writeInt(u32, pe_buf[208..212], 0x3000, .little);
     std.mem.writeInt(u32, pe_buf[212..216], 0x200, .little);
 
@@ -539,7 +748,7 @@ test "parse 32-bit Windows PE DLL binary" {
     std.mem.writeInt(u32, pe_buf[0x3C..0x40], 64, .little);
     @memcpy(pe_buf[64..68], &PE_SIGNATURE);
 
-    std.mem.writeInt(u16, pe_buf[68..70], 0x014C, .little); // i386
+    std.mem.writeInt(u16, pe_buf[68..70], 0x014C, .little);
     std.mem.writeInt(u16, pe_buf[70..72], 3, .little);
     std.mem.writeInt(u16, pe_buf[84..86], 224, .little);
     std.mem.writeInt(u16, pe_buf[86..88], characteristics.DLL | characteristics.EXECUTABLE_IMAGE, .little);
@@ -547,7 +756,7 @@ test "parse 32-bit Windows PE DLL binary" {
     std.mem.writeInt(u16, pe_buf[88..90], OptionalHeaderMagic.PE32, .little);
     std.mem.writeInt(u32, pe_buf[104..108], 0x1000, .little);
     std.mem.writeInt(u32, pe_buf[116..120], 0x10000000, .little);
-    std.mem.writeInt(u16, pe_buf[156..158], 2, .little); // windows_gui
+    std.mem.writeInt(u16, pe_buf[156..158], 2, .little);
 
     const hdr = try Header.parse(&pe_buf);
 
@@ -574,4 +783,97 @@ test "reject invalid signatures" {
     std.mem.writeInt(u32, bad_pe[0x3C..0x40], 64, .little);
     @memcpy(bad_pe[64..68], "NOTP");
     try std.testing.expectError(error.InvalidPeSignature, Header.parse(&bad_pe));
+}
+
+test "parse 40-byte COFF section header" {
+    var sh_buf: [40]u8 = undefined;
+    @memset(&sh_buf, 0);
+
+    @memcpy(sh_buf[0..5], ".text");
+    std.mem.writeInt(u32, sh_buf[8..12], 0x120, .little); // VirtualSize
+    std.mem.writeInt(u32, sh_buf[12..16], 0x1000, .little); // VirtualAddress
+    std.mem.writeInt(u32, sh_buf[16..20], 0x200, .little); // SizeOfRawData
+    std.mem.writeInt(u32, sh_buf[20..24], 0x400, .little); // PointerToRawData
+    std.mem.writeInt(u32, sh_buf[24..28], 0x600, .little); // PointerToRelocations
+    std.mem.writeInt(u16, sh_buf[32..34], 3, .little); // NumberOfRelocations
+    // Flags: CNT_CODE | MEM_EXECUTE | MEM_READ | ALIGN_16BYTES (0x00500000)
+    const flags = section_flags.CNT_CODE | section_flags.MEM_EXECUTE | section_flags.MEM_READ | 0x00500000;
+    std.mem.writeInt(u32, sh_buf[36..40], flags, .little);
+
+    const hdr = Header{
+        .is_pe = false,
+        .machine = .x86_64,
+        .section_count = 1,
+        .time_date_stamp = 0,
+        .symbol_table_offset = 0,
+        .symbol_count = 0,
+        .size_of_optional_header = 0,
+        .characteristics_flags = 0,
+        .section_headers_offset = 0,
+        .optional_header = null,
+    };
+
+    const sh = try hdr.parseSectionHeader(&sh_buf, 0);
+
+    try std.testing.expectEqualStrings(".text", try sh.getName(""));
+    try std.testing.expect(sh.hasCode());
+    try std.testing.expect(sh.isExecutable());
+    try std.testing.expect(sh.isReadable());
+    try std.testing.expect(!sh.isWritable());
+    try std.testing.expectEqual(@as(u32, 16), sh.getAlignment());
+    try std.testing.expectEqual(@as(u32, 0x120), sh.virtual_size);
+    try std.testing.expectEqual(@as(u32, 0x200), sh.size_of_raw_data);
+    try std.testing.expectEqual(@as(u32, 0x400), sh.pointer_to_raw_data);
+    try std.testing.expectEqual(@as(u32, 0x600), sh.pointer_to_relocations);
+    try std.testing.expectEqual(@as(u16, 3), sh.number_of_relocations);
+}
+
+test "resolve long COFF section name from string table" {
+    var sh_buf: [40]u8 = undefined;
+    @memset(&sh_buf, 0);
+
+    // Write slash followed by offset 4: "/4"
+    @memcpy(sh_buf[0..2], "/4");
+    std.mem.writeInt(u32, sh_buf[36..40], section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ, .little);
+
+    const sh = SectionHeader{
+        .raw_name = sh_buf[0..8].*,
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 64,
+        .pointer_to_raw_data = 100,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ,
+    };
+
+    // Mock string table: first 4 bytes are table size (e.g. 24 bytes), followed by strings
+    const strtab_mock = "\x18\x00\x00\x00.very_long_section_name\x00";
+
+    const name = try sh.getName(strtab_mock);
+    try std.testing.expectEqualStrings(".very_long_section_name", name);
+}
+
+test "retrieve COFF section raw data bytes" {
+    var file_mock: [512]u8 = undefined;
+    @memset(&file_mock, 0);
+    @memcpy(file_mock[128..144], "windows_obj_data");
+
+    const sh = SectionHeader{
+        .raw_name = [_]u8{ '.', 'd', 'a', 't', 'a', 0, 0, 0 },
+        .virtual_size = 0,
+        .virtual_address = 0,
+        .size_of_raw_data = 16,
+        .pointer_to_raw_data = 128,
+        .pointer_to_relocations = 0,
+        .pointer_to_linenumbers = 0,
+        .number_of_relocations = 0,
+        .number_of_linenumbers = 0,
+        .characteristics = section_flags.CNT_INITIALIZED_DATA | section_flags.MEM_READ,
+    };
+
+    const data = try sh.getData(&file_mock);
+    try std.testing.expectEqualStrings("windows_obj_data", data);
 }
