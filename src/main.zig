@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("  Entry Point   : {s}\n", .{final_entry});
     std.debug.print("  Shared Mode   : {}\n", .{options.is_shared});
 
-    // Phase 1.5 & Phase 2.1: Open, map, and inspect headers
+    // Phase 1.5, 2.1 & 2.2: Open, map, and inspect headers and sections
     std.debug.print("  Input Files ({d}):\n", .{options.input_files.items.len});
     for (options.input_files.items) |file_path| {
         var mapped = sibl.MappedFile.open(io, file_path) catch |err| {
@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
         };
         defer mapped.deinit(io);
 
-        // If the file starts with ELF magic, parse and show its header info
+        // If file starts with ELF magic, parse header and sections
         if (mapped.data.len >= 4 and std.mem.eql(u8, mapped.data[0..4], &sibl.elf.MAGIC)) {
             const elf_hdr = sibl.elf.Header.parse(mapped.data) catch |err| {
                 std.debug.print("sibl: error: failed to parse ELF header for '{s}': {s}\n", .{ file_path, @errorName(err) });
@@ -78,12 +78,34 @@ pub fn main(init: std.process.Init) !void {
 
             std.debug.print("    - {s} [ELF {s} {s} {s}] ({d} sections at 0x{x})\n", .{
                 file_path,
-                @tagName(elf_hdr.class),
-                @tagName(elf_hdr.machine),
-                @tagName(elf_hdr.file_type),
+                elf_hdr.class.name(),
+                elf_hdr.machine.name(),
+                elf_hdr.file_type.name(),
                 elf_hdr.shnum,
                 elf_hdr.shoff,
             });
+
+            // Phase 2.2: Parse sections and print details
+            const shstrtab = elf_hdr.getSectionStringTable(mapped.data) catch &.{};
+            const sections = elf_hdr.parseAllSectionHeaders(arena, mapped.data) catch |err| {
+                std.debug.print("      warning: could not read section headers: {s}\n", .{@errorName(err)});
+                continue;
+            };
+
+            for (sections, 0..) |sh, idx| {
+                if (sh.sh_type == .null) continue;
+                const name = sh.getName(shstrtab) catch "<unnamed>";
+                std.debug.print("      [{d:2}] {s:<24} type={s:<14} size=0x{x:<6} align={d:<2} flags={s}{s}{s}\n", .{
+                    idx,
+                    name,
+                    sh.sh_type.name(),
+                    sh.size,
+                    sh.addralign,
+                    if (sh.isAlloc()) "A" else "",
+                    if (sh.isWritable()) "W" else "",
+                    if (sh.isExecutable()) "X" else "",
+                });
+            }
         } else {
             std.debug.print("    - {s} ({d} bytes mapped)\n", .{ file_path, mapped.size });
         }

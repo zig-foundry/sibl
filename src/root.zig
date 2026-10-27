@@ -19,7 +19,7 @@ pub const target = @import("target.zig");
 /// Zero-copy memory mapped file reader (Phase 1.5).
 pub const file = @import("file.zig");
 
-/// ELF parsing and format inspection (Phase 2.1).
+/// ELF parsing and format inspection (Phase 2.1 & 2.2).
 pub const elf = @import("elf.zig");
 
 // === Re-exported Types and Functions ===
@@ -49,6 +49,9 @@ pub const ElfHeader = elf.Header;
 pub const ElfClass = elf.Class;
 pub const ElfMachine = elf.Machine;
 pub const ElfFileType = elf.FileType;
+pub const ElfSectionHeader = elf.SectionHeader;
+pub const ElfSectionType = elf.SectionType;
+pub const elf_flags = elf.flags;
 
 // === Test Suite Runner ===
 
