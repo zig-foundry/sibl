@@ -1,7 +1,8 @@
-//! Phase 4.1 - 4.4: Mach-O Header, Load Commands, Sections, and Nlist Symbol Reader.
+//! Phase 4.1 - 4.5: Mach-O Header, Load Commands, Sections, Symbols, and Relocations.
 //!
 //! Provides zero-copy parsing for 32-bit and 64-bit Mach-O binaries,
-//! load command decoding, section extraction, and nlist_64 symbol table parsing.
+//! load command decoding, section extraction, nlist_64 symbol reading,
+//! and 8-byte relocation_info bitfield decoding.
 
 const std = @import("std");
 
@@ -312,19 +313,19 @@ pub const vm_prot = struct {
 
 /// Bitmasks for n_type field in nlist_64.
 pub const nlist_masks = struct {
-    pub const STAB: u8 = 0xE0; // Symbolic debugging entries
-    pub const PEXT: u8 = 0x10; // Private external symbol bit
-    pub const TYPE: u8 = 0x0E; // Mask for symbol type
-    pub const EXT: u8 = 0x01; // External symbol bit (global linkage)
+    pub const STAB: u8 = 0xE0;
+    pub const PEXT: u8 = 0x10;
+    pub const TYPE: u8 = 0x0E;
+    pub const EXT: u8 = 0x01;
 };
 
 /// Symbol types for n_type field in nlist_64.
 pub const nlist_type = struct {
-    pub const UNDF: u8 = 0x0; // Undefined symbol (or COMMON if n_value > 0)
-    pub const ABS: u8 = 0x2; // Absolute symbol (not relocated)
-    pub const SECT: u8 = 0xE; // Defined in section number n_sect
-    pub const PBUD: u8 = 0xC; // Prebound undefined
-    pub const INDR: u8 = 0xA; // Indirect symbol (alias to another symbol)
+    pub const UNDF: u8 = 0x0;
+    pub const ABS: u8 = 0x2;
+    pub const SECT: u8 = 0xE;
+    pub const PBUD: u8 = 0xC;
+    pub const INDR: u8 = 0xA;
 };
 
 /// Reference flags and attributes for n_desc field in nlist_64.
@@ -339,12 +340,18 @@ pub const nlist_desc = struct {
 
     pub const ARM_THUMB_DEF: u16 = 0x0008;
     pub const NO_DEAD_STRIP: u16 = 0x0020;
-    pub const WEAK_REF: u16 = 0x0040; // Weak reference
-    pub const WEAK_DEF: u16 = 0x0080; // Weak definition
+    pub const WEAK_REF: u16 = 0x0040;
+    pub const WEAK_DEF: u16 = 0x0080;
     pub const REF_TO_WEAK: u16 = 0x0080;
     pub const SYMBOL_RESOLVER: u16 = 0x0100;
     pub const ALT_ENTRY: u16 = 0x0200;
     pub const COLD_FUNC: u16 = 0x0400;
+};
+
+// === Relocation Constants ===
+
+pub const reloc_constants = struct {
+    pub const R_SCATTERED: u32 = 0x80000000;
 };
 
 // === Error Sets ===
@@ -372,6 +379,121 @@ pub const SymbolError = error{
     InvalidSymbolIndex,
     StringTableOutOfBounds,
 };
+
+pub const RelocationError = error{
+    TruncatedRelocationTable,
+    InvalidRelocationIndex,
+};
+
+// === Decoded Relocation Structure ===
+
+/// Normalized representation for an 8-byte Mach-O relocation_info record.
+pub const Relocation = struct {
+    address: u32,
+    symbolnum: u32,
+    pcrel: bool,
+    length: u2, // 0=1 byte, 1=2 bytes, 2=4 bytes, 3=8 bytes
+    is_extern: bool,
+    type_id: u4,
+    is_scattered: bool,
+    scattered_value: u32,
+
+    pub fn byteSize(self: Relocation) usize {
+        return @as(usize, 1) << self.length;
+    }
+
+    pub fn typeName(self: Relocation, cpu: CpuType) []const u8 {
+        return switch (cpu) {
+            .arm64, .arm64_32 => switch (self.type_id) {
+                0 => "UNSIGNED",
+                1 => "SUBTRACTOR",
+                2 => "BRANCH26",
+                3 => "PAGE21",
+                4 => "PAGEOFF12",
+                5 => "GOT_LOAD_PAGE21",
+                6 => "GOT_LOAD_PAGEOFF12",
+                7 => "POINTER_TO_GOT",
+                8 => "TLVP_PAGE21",
+                9 => "TLVP_PAGEOFF12",
+                10 => "ADDEND",
+                11 => "AUTHENTICATED_POINTER",
+                else => "ARM64_RELOC",
+            },
+            .x86_64 => switch (self.type_id) {
+                0 => "UNSIGNED",
+                1 => "SIGNED",
+                2 => "BRANCH",
+                3 => "GOT_LOAD",
+                4 => "GOT",
+                5 => "SUBTRACTOR",
+                6 => "SIGNED_1",
+                7 => "SIGNED_2",
+                8 => "SIGNED_4",
+                9 => "TLV",
+                else => "X86_64_RELOC",
+            },
+            .i386 => switch (self.type_id) {
+                0 => "VANILLA",
+                1 => "PAIR",
+                2 => "SECTDIFF",
+                3 => "PB_LA_PTR",
+                4 => "LOCAL_SECTDIFF",
+                5 => "TLV",
+                else => "GENERIC_RELOC",
+            },
+            else => "RELOC",
+        };
+    }
+};
+
+/// Helper to decode an 8-byte relocation_info record from raw bytes.
+pub fn parseRelocation(bytes: []const u8, endian: std.builtin.Endian) RelocationError!Relocation {
+    if (bytes.len < 8) return error.TruncatedRelocationTable;
+
+    const raw_addr = std.mem.readInt(u32, bytes[0..][0..4], endian);
+    const is_scattered = (raw_addr & reloc_constants.R_SCATTERED) != 0;
+
+    if (is_scattered) {
+        // Scattered relocation:
+        // raw_addr layout: [1 bit scattered][1 bit pcrel][2 bits length][4 bits type][24 bits address]
+        const pcrel = ((raw_addr >> 30) & 1) != 0;
+        const length: u2 = @truncate((raw_addr >> 28) & 3);
+        const type_id: u4 = @truncate((raw_addr >> 24) & 0xF);
+        const address = raw_addr & 0x00FFFFFF;
+        const value = std.mem.readInt(u32, bytes[4..][0..4], endian);
+
+        return .{
+            .address = address,
+            .symbolnum = 0,
+            .pcrel = pcrel,
+            .length = length,
+            .is_extern = false,
+            .type_id = type_id,
+            .is_scattered = true,
+            .scattered_value = value,
+        };
+    } else {
+        // Standard relocation:
+        // bytes[4..8] layout: [24 bits symbolnum][1 bit pcrel][2 bits length][1 bit extern][4 bits type]
+        const r_info = std.mem.readInt(u32, bytes[4..][0..4], endian);
+        const symbolnum = r_info & 0x00FFFFFF;
+        const pcrel = ((r_info >> 24) & 1) != 0;
+        const length: u2 = @truncate((r_info >> 25) & 3);
+        const is_extern = ((r_info >> 27) & 1) != 0;
+        const type_id: u4 = @truncate((r_info >> 28) & 0xF);
+
+        return .{
+            .address = raw_addr,
+            .symbolnum = symbolnum,
+            .pcrel = pcrel,
+            .length = length,
+            .is_extern = is_extern,
+            .type_id = type_id,
+            .is_scattered = false,
+            .scattered_value = 0,
+        };
+    }
+}
 
 // === Decoded Section 64 Structure ===
 
@@ -432,6 +554,31 @@ pub const Section64 = struct {
         }
 
         return file_bytes[start..end];
+    }
+
+    /// Parse a single 8-byte relocation entry for this section.
+    pub fn parseRelocation(self: *const Section64, file_bytes: []const u8, endian: std.builtin.Endian, index: usize) RelocationError!Relocation {
+        if (index >= self.nreloc) return error.InvalidRelocationIndex;
+        const offset: usize = self.reloff + (index * 8);
+        if (offset + 8 > file_bytes.len) return error.TruncatedRelocationTable;
+        return @import("macho.zig").parseRelocation(file_bytes[offset .. offset + 8], endian);
+    }
+
+    /// Parse all relocations for this section into an allocated slice.
+    pub fn parseAllRelocations(
+        self: *const Section64,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+        endian: std.builtin.Endian,
+    ) (RelocationError || std.mem.Allocator.Error)![]Relocation {
+        const relocs = try allocator.alloc(Relocation, self.nreloc);
+        errdefer allocator.free(relocs);
+
+        var i: usize = 0;
+        while (i < self.nreloc) : (i += 1) {
+            relocs[i] = try self.parseRelocation(file_bytes, endian, i);
+        }
+        return relocs;
     }
 };
 
@@ -1220,11 +1367,11 @@ test "parse 16-byte Mach-O nlist_64 defined section symbol" {
     var sym_buf: [16]u8 = undefined;
     @memset(&sym_buf, 0);
 
-    std.mem.writeInt(u32, sym_buf[0..4], 1, .little); // strx = 1
-    sym_buf[4] = nlist_type.SECT | nlist_masks.EXT; // N_SECT | N_EXT
-    sym_buf[5] = 1; // n_sect = 1 (__text)
-    std.mem.writeInt(u16, sym_buf[6..8], 0, .little); // n_desc = 0
-    std.mem.writeInt(u64, sym_buf[8..16], 0x1000, .little); // n_value = 0x1000
+    std.mem.writeInt(u32, sym_buf[0..4], 1, .little);
+    sym_buf[4] = nlist_type.SECT | nlist_masks.EXT;
+    sym_buf[5] = 1;
+    std.mem.writeInt(u16, sym_buf[6..8], 0, .little);
+    std.mem.writeInt(u64, sym_buf[8..16], 0x1000, .little);
 
     const sym = try parseNlist64(&sym_buf, .little);
 
@@ -1244,17 +1391,15 @@ test "parse 16-byte Mach-O nlist_64 defined section symbol" {
 }
 
 test "parse Mach-O nlist_64 undefined and weak symbols" {
-    // Undefined external symbol with weak ref and library ordinal #2
     var sym_buf: [16]u8 = undefined;
     @memset(&sym_buf, 0);
 
-    std.mem.writeInt(u32, sym_buf[0..4], 1, .little); // strx = 1
-    sym_buf[4] = nlist_type.UNDF | nlist_masks.EXT; // N_UNDF | N_EXT
+    std.mem.writeInt(u32, sym_buf[0..4], 1, .little);
+    sym_buf[4] = nlist_type.UNDF | nlist_masks.EXT;
     sym_buf[5] = Nlist64.NO_SECT;
-    // library ordinal 2 in upper byte, N_WEAK_REF (0x40) in lower byte
     const desc: u16 = (2 << 8) | nlist_desc.WEAK_REF;
     std.mem.writeInt(u16, sym_buf[6..8], desc, .little);
-    std.mem.writeInt(u64, sym_buf[8..16], 0, .little); // value = 0
+    std.mem.writeInt(u64, sym_buf[8..16], 0, .little);
 
     const sym = try parseNlist64(&sym_buf, .little);
 
@@ -1267,22 +1412,20 @@ test "parse Mach-O nlist_64 undefined and weak symbols" {
 }
 
 test "parse Mach-O common and stab symbols" {
-    // COMMON: N_UNDF with value > 0 (size)
     const common_sym = Nlist64{
         .strx = 1,
         .type_flags = nlist_type.UNDF | nlist_masks.EXT,
         .sect = 0,
         .desc = 0,
-        .value = 512, // size = 512 bytes
+        .value = 512,
     };
     try std.testing.expect(common_sym.isCommon());
     try std.testing.expect(!common_sym.isUndefined());
     try std.testing.expectEqualStrings("COMMON", common_sym.typeName());
 
-    // STAB: debug symbol
     const stab_sym = Nlist64{
         .strx = 0,
-        .type_flags = 0x64, // N_SO (source file name stab)
+        .type_flags = 0x64,
         .sect = 0,
         .desc = 0,
         .value = 0,
@@ -1290,4 +1433,110 @@ test "parse Mach-O common and stab symbols" {
     try std.testing.expect(stab_sym.isStab());
     try std.testing.expectEqualStrings("STAB", stab_sym.typeName());
     try std.testing.expectEqualStrings("", try stab_sym.getName(""));
+}
+
+test "parse standard 8-byte ARM64 Mach-O relocation entry" {
+    var rel_buf: [8]u8 = undefined;
+    @memset(&rel_buf, 0);
+
+    // r_address = 0x48 (patch offset)
+    std.mem.writeInt(u32, rel_buf[0..4], 0x48, .little);
+
+    // r_info:
+    // symbolnum = 42
+    // pcrel = 1 (bit 24)
+    // length = 2 (bits 25..26: 4 bytes)
+    // is_extern = 1 (bit 27)
+    // type = 3 (bits 28..31: ARM64_RELOC_PAGE21)
+    const symbolnum: u32 = 42;
+    const pcrel: u32 = 1 << 24;
+    const length: u32 = 2 << 25;
+    const is_extern: u32 = 1 << 27;
+    const r_type: u32 = 3 << 28;
+    const r_info = symbolnum | pcrel | length | is_extern | r_type;
+    std.mem.writeInt(u32, rel_buf[4..8], r_info, .little);
+
+    const rel = try parseRelocation(&rel_buf, .little);
+
+    try std.testing.expect(!rel.is_scattered);
+    try std.testing.expectEqual(@as(u32, 0x48), rel.address);
+    try std.testing.expectEqual(@as(u32, 42), rel.symbolnum);
+    try std.testing.expect(rel.pcrel);
+    try std.testing.expectEqual(@as(u2, 2), rel.length);
+    try std.testing.expectEqual(@as(usize, 4), rel.byteSize());
+    try std.testing.expect(rel.is_extern);
+    try std.testing.expectEqual(@as(u4, 3), rel.type_id);
+    try std.testing.expectEqualStrings("PAGE21", rel.typeName(.arm64));
+}
+
+test "parse standard 8-byte x86_64 Mach-O relocation entry" {
+    var rel_buf: [8]u8 = undefined;
+    @memset(&rel_buf, 0);
+
+    // r_address = 0x1A
+    std.mem.writeInt(u32, rel_buf[0..4], 0x1A, .little);
+
+    // symbolnum = 12, pcrel = 1, length = 2 (4 bytes), is_extern = 1, type = 2 (X86_64_RELOC_BRANCH)
+    const r_info: u32 = 12 | (1 << 24) | (2 << 25) | (1 << 27) | (2 << 28);
+    std.mem.writeInt(u32, rel_buf[4..8], r_info, .little);
+
+    const rel = try parseRelocation(&rel_buf, .little);
+
+    try std.testing.expect(!rel.is_scattered);
+    try std.testing.expectEqual(@as(u32, 0x1A), rel.address);
+    try std.testing.expectEqual(@as(u32, 12), rel.symbolnum);
+    try std.testing.expect(rel.pcrel);
+    try std.testing.expectEqualStrings("BRANCH", rel.typeName(.x86_64));
+}
+
+test "parse scattered Mach-O relocation entry" {
+    var rel_buf: [8]u8 = undefined;
+    @memset(&rel_buf, 0);
+
+    // raw_addr with R_SCATTERED (bit 31), pcrel (bit 30), length 2 (bits 28..29), type 0 (bits 24..27), address 0x100
+    const raw_addr: u32 = reloc_constants.R_SCATTERED | (1 << 30) | (2 << 28) | (0 << 24) | 0x100;
+    std.mem.writeInt(u32, rel_buf[0..4], raw_addr, .little);
+    std.mem.writeInt(u32, rel_buf[4..8], 0x4000, .little); // target value
+
+    const rel = try parseRelocation(&rel_buf, .little);
+
+    try std.testing.expect(rel.is_scattered);
+    try std.testing.expectEqual(@as(u32, 0x100), rel.address);
+    try std.testing.expect(rel.pcrel);
+    try std.testing.expectEqual(@as(u2, 2), rel.length);
+    try std.testing.expectEqual(@as(u32, 0x4000), rel.scattered_value);
+}
+
+test "parse section relocations slice from Section64" {
+    var file_mock: [64]u8 = undefined;
+    @memset(&file_mock, 0);
+
+    // Write a relocation at offset 32
+    std.mem.writeInt(u32, file_mock[32..36], 0x20, .little);
+    const r_info: u32 = 5 | (0 << 24) | (3 << 25) | (1 << 27) | (0 << 28); // 8-byte UNSIGNED
+    std.mem.writeInt(u32, file_mock[36..40], r_info, .little);
+
+    const sec = Section64{
+        .raw_sectname = [_]u8{ '_', '_', 'd', 'a', 't', 'a', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        .raw_segname = [_]u8{ '_', '_', 'D', 'A', 'T', 'A', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        .addr = 0,
+        .size = 64,
+        .offset = 0,
+        .align_p2 = 3,
+        .reloff = 32,
+        .nreloc = 1,
+        .flags = @backingInt(SectionType.regular),
+        .reserved1 = 0,
+        .reserved2 = 0,
+        .reserved3 = 0,
+    };
+
+    const rel = try sec.parseRelocation(&file_mock, .little, 0);
+    try std.testing.expectEqual(@as(u32, 0x20), rel.address);
+    try std.testing.expectEqual(@as(u32, 5), rel.symbolnum);
+    try std.testing.expect(!rel.pcrel);
+    try std.testing.expectEqual(@as(usize, 8), rel.byteSize());
+    try std.testing.expectEqualStrings("UNSIGNED", rel.typeName(.arm64));
+
+    try std.testing.expectError(error.InvalidRelocationIndex, sec.parseRelocation(&file_mock, .little, 1));
 }

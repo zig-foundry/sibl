@@ -171,7 +171,21 @@ pub fn main(init: std.process.Init) !void {
                 macho_hdr.isPie(),
             });
 
-            // Decode load commands
+            // Pre-scan to find LC_SYMTAB so section relocations can resolve symbol names
+            var cached_symtab: ?sibl.MachoSymtabCommand = null;
+            if (macho_hdr.loadCommands(mapped.data)) |mut_prescan| {
+                var prescan = mut_prescan;
+                while (prescan.next() catch null) |lc| {
+                    if (lc.cmd == .symtab) {
+                        cached_symtab = lc.asSymtab(macho_hdr.endian) catch null;
+                        break;
+                    }
+                }
+            } else |_| {}
+
+            const sym_strtab = if (cached_symtab) |st| st.getStringTable(mapped.data) else &.{};
+
+            // Main pass: decode commands, sections, and relocations
             if (macho_hdr.loadCommands(mapped.data)) |mut_iter| {
                 var iter = mut_iter;
                 var cmd_idx: usize = 0;
@@ -201,6 +215,36 @@ pub fn main(init: std.process.Init) !void {
                                         sec.getType().name(),
                                         sec.nreloc,
                                     });
+
+                                    // Phase 4.5: Print sample relocations belonging to this section
+                                    if (sec.nreloc > 0) {
+                                        const print_limit = @min(sec.nreloc, 3);
+                                        var r_idx: usize = 0;
+                                        while (r_idx < print_limit) : (r_idx += 1) {
+                                            const r = sec.parseRelocation(mapped.data, macho_hdr.endian, r_idx) catch continue;
+
+                                            var target_name: []const u8 = "<local-sect>";
+                                            if (r.is_extern and cached_symtab != null) {
+                                                if (cached_symtab.?.parseSymbol(mapped.data, macho_hdr.endian, r.symbolnum)) |sym| {
+                                                    target_name = sym.getName(sym_strtab) catch "<unnamed>";
+                                                } else |_| {}
+                                            }
+
+                                            std.debug.print("              -> ({d:2}) off=0x{x:<8} type={s:<16} sz={d}b {s} target=[{d:4}] {s}\n", .{
+                                                r_idx,
+                                                r.address,
+                                                r.typeName(macho_hdr.cpu_type),
+                                                r.byteSize(),
+                                                if (r.pcrel) "pcrel" else "abs  ",
+                                                r.symbolnum,
+                                                if (target_name.len == 0) "<empty>" else target_name,
+                                            });
+                                        }
+
+                                        if (sec.nreloc > print_limit) {
+                                            std.debug.print("              -> ... and {d} more relocations\n", .{sec.nreloc - print_limit});
+                                        }
+                                    }
                                 }
                             } else |_| {}
                         },
@@ -215,9 +259,8 @@ pub fn main(init: std.process.Init) !void {
                                     sym_cmd.strsize,
                                 });
 
-                                // Phase 4.4: Read and print nlist_64 symbols
                                 const strtab = sym_cmd.getStringTable(mapped.data);
-                                const print_limit = @min(sym_cmd.nsyms, 8);
+                                const print_limit = @min(sym_cmd.nsyms, 6);
                                 var sym_idx: usize = 0;
                                 while (sym_idx < print_limit) : (sym_idx += 1) {
                                     const sym = sym_cmd.parseSymbol(mapped.data, macho_hdr.endian, sym_idx) catch break;

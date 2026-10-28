@@ -28,7 +28,7 @@ pub const strtab = @import("strtab.zig");
 /// PE and COFF parsing for Windows targets (Phase 3.1 - 3.5).
 pub const coff = @import("coff.zig");
 
-/// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1 - 4.4).
+/// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1 - 4.5).
 pub const macho = @import("macho.zig");
 
 // === Re-exported Types and Functions ===
@@ -112,12 +112,15 @@ pub const MachoDylibCommand = macho.DylibCommand;
 pub const MachoBuildVersionCommand = macho.BuildVersionCommand;
 pub const MachoNlist64 = macho.Nlist64;
 pub const MachoSymbolError = macho.SymbolError;
+pub const MachoRelocation = macho.Relocation;
+pub const MachoRelocationError = macho.RelocationError;
 pub const macho_flags = macho.flags;
 pub const macho_vm_prot = macho.vm_prot;
 pub const macho_section_attributes = macho.section_attributes;
 pub const macho_nlist_masks = macho.nlist_masks;
 pub const macho_nlist_type = macho.nlist_type;
 pub const macho_nlist_desc = macho.nlist_desc;
+pub const macho_reloc_constants = macho.reloc_constants;
 
 // === Test Suite Runner ===
 
