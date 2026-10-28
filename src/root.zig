@@ -31,7 +31,7 @@ pub const coff = @import("coff.zig");
 /// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1 - 4.5).
 pub const macho = @import("macho.zig");
 
-/// Static archive (.a and .lib) parsing (Phase 5.1).
+/// Static archive (.a and .lib) parsing (Phase 5.1 & 5.2).
 pub const archive = @import("archive.zig");
 
 // === Re-exported Types and Functions ===
@@ -129,9 +129,13 @@ pub const macho_reloc_constants = macho.reloc_constants;
 pub const Archive = archive.Archive;
 pub const ArchiveMemberHeader = archive.MemberHeader;
 pub const ArchiveMemberIterator = archive.MemberIterator;
+pub const ArchiveSymbol = archive.ArchiveSymbol;
+pub const ArchiveSymbolIndex = archive.SymbolIndex;
+pub const ArchiveSymbolIterator = archive.SymbolIterator;
 pub const ArchiveError = archive.Error;
 pub const archive_magic = archive.ARMAG;
 pub const archive_thin_magic = archive.THIN_ARMAG;
+pub const archive_trailer_magic = archive.ARFMAG;
 
 // === Test Suite Runner ===
 

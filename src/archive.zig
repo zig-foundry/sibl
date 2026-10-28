@@ -1,7 +1,7 @@
-//! Phase 5.1: Static Archive Header Validation and Member Parser for sibl.
+//! Phase 5.1 & 5.2: Static Archive Header Validation, Member Parser, and Symbol Index.
 //!
 //! Provides zero-copy parsing for Unix static archives (.a) and Windows
-//! import/static libraries (.lib), supporting standard, thin, GNU, and BSD variants.
+//! import/static libraries (.lib), supporting GNU ('/') and BSD ('__.SYMDEF') symbol indices.
 
 const std = @import("std");
 
@@ -27,6 +27,8 @@ pub const Error = error{
     InvalidOctalField,
     InvalidMemberSize,
     StringTableOutOfBounds,
+    TruncatedSymbolTable,
+    InvalidSymbolTable,
 };
 
 // === Helper Numeric Parsers ===
@@ -42,6 +44,15 @@ fn parseOctal(comptime T: type, raw: []const u8) Error!T {
     if (trimmed.len == 0) return 0;
     return std.fmt.parseInt(T, trimmed, 8) catch error.InvalidOctalField;
 }
+
+// === Archive Symbol Representation ===
+
+/// Normalized symbol mapping an exported identifier to its defining member header offset.
+pub const ArchiveSymbol = struct {
+    name: []const u8,
+    /// Byte offset in the archive file where the defining member's 60-byte header begins.
+    member_offset: usize,
+};
 
 // === Decoded Member Header ===
 
@@ -126,7 +137,6 @@ pub const MemberHeader = struct {
 
         // 3. Special tables ("/ " or "//")
         const trimmed = std.mem.trim(u8, &self.raw_name, " ");
-
         if (std.mem.eql(u8, trimmed, "/") or std.mem.eql(u8, trimmed, "//")) {
             return trimmed;
         }
@@ -148,7 +158,6 @@ pub const MemberHeader = struct {
 
         if (self.isBsdExtendedName()) {
             const trimmed = std.mem.trim(u8, self.raw_name[3..], " ");
-
             const name_len = std.fmt.parseInt(usize, trimmed, 10) catch return error.InvalidDecimalField;
             if (name_len > self.size) return error.InvalidMemberSize;
             start += name_len;
@@ -216,6 +225,159 @@ pub const MemberIterator = struct {
     }
 };
 
+// === Symbol Table Iterator ===
+
+/// Zero-allocation streaming iterator across all symbols in an archive symbol index.
+pub const SymbolIterator = struct {
+    kind: SymbolIndex.Kind,
+    data: []const u8,
+    symbol_count: usize,
+    current_index: usize,
+    gnu_str_cursor: usize,
+    bsd_strtab_start: usize,
+
+    pub fn next(self: *SymbolIterator) Error!?ArchiveSymbol {
+        if (self.current_index >= self.symbol_count) return null;
+
+        switch (self.kind) {
+            .gnu => {
+                const off_pos = 4 + (self.current_index * 4);
+                if (off_pos + 4 > self.data.len) return error.TruncatedSymbolTable;
+                const member_offset = std.mem.readInt(u32, self.data[off_pos..][0..4], .big);
+
+                if (self.gnu_str_cursor >= self.data.len) return error.TruncatedSymbolTable;
+                const slice = self.data[self.gnu_str_cursor..];
+                const term_len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.TruncatedSymbolTable;
+                const name = slice[0..term_len];
+
+                self.gnu_str_cursor += term_len + 1;
+                self.current_index += 1;
+
+                return .{
+                    .name = name,
+                    .member_offset = member_offset,
+                };
+            },
+            .bsd => {
+                const ran_pos = 4 + (self.current_index * 8);
+                if (ran_pos + 8 > self.data.len) return error.TruncatedSymbolTable;
+                const ran_strx = std.mem.readInt(u32, self.data[ran_pos..][0..4], .little);
+                const ran_off = std.mem.readInt(u32, self.data[ran_pos + 4 ..][0..4], .little);
+
+                const str_pos = self.bsd_strtab_start + ran_strx;
+                if (str_pos >= self.data.len) return error.StringTableOutOfBounds;
+
+                const slice = self.data[str_pos..];
+                const term_len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.TruncatedSymbolTable;
+                const name = slice[0..term_len];
+
+                self.current_index += 1;
+
+                return .{
+                    .name = name,
+                    .member_offset = ran_off,
+                };
+            },
+        }
+    }
+};
+
+// === Decoded Symbol Index ===
+
+/// Normalized representation for an archive's symbol index table.
+pub const SymbolIndex = struct {
+    pub const Kind = enum {
+        gnu,
+        bsd,
+    };
+
+    kind: Kind,
+    data: []const u8,
+    symbol_count: usize,
+    strtab_offset: usize,
+
+    /// Parse a raw member data slice as a symbol table index.
+    pub fn parse(data: []const u8, kind: Kind) Error!SymbolIndex {
+        switch (kind) {
+            .gnu => {
+                if (data.len < 4) return error.TruncatedSymbolTable;
+                const nsyms = std.mem.readInt(u32, data[0..4], .big);
+                const table_bytes = std.math.mul(usize, @as(usize, nsyms), 4) catch return error.InvalidSymbolTable;
+                const strtab_start = std.math.add(usize, 4, table_bytes) catch return error.InvalidSymbolTable;
+                if (strtab_start > data.len) return error.TruncatedSymbolTable;
+
+                return .{
+                    .kind = .gnu,
+                    .data = data,
+                    .symbol_count = nsyms,
+                    .strtab_offset = strtab_start,
+                };
+            },
+            .bsd => {
+                if (data.len < 4) return error.TruncatedSymbolTable;
+                const ran_size = std.mem.readInt(u32, data[0..4], .little);
+                if (ran_size % 8 != 0) return error.InvalidSymbolTable;
+                const ran_count = ran_size / 8;
+
+                const strsize_offset = std.math.add(usize, 4, @as(usize, ran_size)) catch return error.InvalidSymbolTable;
+                if (strsize_offset + 4 > data.len) return error.TruncatedSymbolTable;
+
+                const strsize = std.mem.readInt(u32, data[strsize_offset..][0..4], .little);
+                const strtab_start = strsize_offset + 4;
+                const expected_end = std.math.add(usize, strtab_start, @as(usize, strsize)) catch return error.InvalidSymbolTable;
+                if (expected_end > data.len) return error.TruncatedSymbolTable;
+
+                return .{
+                    .kind = .bsd,
+                    .data = data,
+                    .symbol_count = ran_count,
+                    .strtab_offset = strtab_start,
+                };
+            },
+        }
+    }
+
+    /// Return an iterator over all archive symbols.
+    pub fn iterator(self: *const SymbolIndex) SymbolIterator {
+        return .{
+            .kind = self.kind,
+            .data = self.data,
+            .symbol_count = self.symbol_count,
+            .current_index = 0,
+            .gnu_str_cursor = self.strtab_offset,
+            .bsd_strtab_start = self.strtab_offset,
+        };
+    }
+
+    /// Parse all symbols into an allocated slice.
+    pub fn parseAllSymbols(
+        self: *const SymbolIndex,
+        allocator: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]ArchiveSymbol {
+        const syms = try allocator.alloc(ArchiveSymbol, self.symbol_count);
+        errdefer allocator.free(syms);
+
+        var iter = self.iterator();
+        var i: usize = 0;
+        while (try iter.next()) |s| : (i += 1) {
+            syms[i] = s;
+        }
+        return syms;
+    }
+
+    /// Search the symbol index for a specific symbol name.
+    /// Returns the file offset of the defining member header if found.
+    pub fn findSymbol(self: *const SymbolIndex, name: []const u8) Error!?usize {
+        var iter = self.iterator();
+        while (try iter.next()) |s| {
+            if (std.mem.eql(u8, s.name, name)) {
+                return s.member_offset;
+            }
+        }
+        return null;
+    }
+};
+
 // === Archive Container ===
 
 /// Normalized representation for a static library archive.
@@ -262,6 +424,21 @@ pub const Archive = struct {
         return null;
     }
 
+    /// Find and parse the archive's central symbol index (GNU '/' or BSD '__.SYMDEF').
+    pub fn getSymbolIndex(self: *const Archive) Error!?SymbolIndex {
+        var iter = self.iterator();
+        while (try iter.next()) |member| {
+            if (member.isGnuSymbolTable()) {
+                const data = try member.getData(self.file_bytes);
+                return try SymbolIndex.parse(data, .gnu);
+            } else if (member.isBsdSymbolTable(self.file_bytes)) {
+                const data = try member.getData(self.file_bytes);
+                return try SymbolIndex.parse(data, .bsd);
+            }
+        }
+        return null;
+    }
+
     pub fn iterator(self: *const Archive) MemberIterator {
         return .{
             .file_bytes = self.file_bytes,
@@ -295,15 +472,14 @@ test "parse 60-byte member header with decimal and octal fields" {
     var file_buf: [68]u8 = undefined;
     @memcpy(file_buf[0..8], ARMAG);
 
-    // Member header at offset 8 (60 bytes)
     var hdr = file_buf[8..68];
     @memset(hdr, ' ');
     @memcpy(hdr[0..6], "foo.o/");
-    @memcpy(hdr[16..26], "1700000000"); // date
-    @memcpy(hdr[28..32], "1001"); // uid
-    @memcpy(hdr[34..38], "1002"); // gid
-    @memcpy(hdr[40..46], "100644"); // mode (octal)
-    @memcpy(hdr[48..49], "0"); // size = 0
+    @memcpy(hdr[16..26], "1700000000");
+    @memcpy(hdr[28..32], "1001");
+    @memcpy(hdr[34..38], "1002");
+    @memcpy(hdr[40..46], "100644");
+    @memcpy(hdr[48..49], "0");
     @memcpy(hdr[58..60], ARFMAG);
 
     const ar = try Archive.parse(&file_buf);
@@ -327,7 +503,7 @@ test "reject member header with invalid trailer magic" {
     @memset(hdr, ' ');
     @memcpy(hdr[0..6], "bar.o/");
     @memcpy(hdr[48..49], "0");
-    @memcpy(hdr[58..60], "XX"); // Corrupted trailer
+    @memcpy(hdr[58..60], "XX");
 
     const ar = try Archive.parse(&file_buf);
     var iter = ar.iterator();
@@ -335,12 +511,6 @@ test "reject member header with invalid trailer magic" {
 }
 
 test "resolve GNU long member name from string table" {
-    // Layout:
-    // 0..8: ARMAG
-    // 8..68: Member 1 ("//") -> size 32
-    // 68..100: string table payload: "my_very_long_file_name.o/\n\x00"
-    // 100..160: Member 2 ("/0") -> size 4
-    // 160..164: payload: "DATA"
     var buf: [164]u8 = undefined;
     @memset(&buf, ' ');
     @memcpy(buf[0..8], ARMAG);
@@ -352,8 +522,8 @@ test "resolve GNU long member name from string table" {
     @memcpy(buf[68..94], "my_very_long_file_name.o/\n");
 
     // 2. Member 2 header at 100
-    @memcpy(buf[100..102], "/0"); // references offset 0 in string table
-    @memcpy(buf[148..149], "4"); // size = 4
+    @memcpy(buf[100..102], "/0");
+    @memcpy(buf[148..149], "4");
     @memcpy(buf[158..160], ARFMAG);
     @memcpy(buf[160..164], "DATA");
 
@@ -371,11 +541,6 @@ test "resolve GNU long member name from string table" {
 }
 
 test "resolve BSD extended member name embedded in payload" {
-    // Layout:
-    // 0..8: ARMAG
-    // 8..68: Header with name "#1/20" and size 28 (20 bytes name + 8 bytes data)
-    // 68..88: "apple_long_object.o\x00" (20 bytes)
-    // 88..96: "DATA1234" (8 bytes actual data)
     var buf: [96]u8 = undefined;
     @memset(&buf, ' ');
     @memcpy(buf[0..8], ARMAG);
@@ -396,25 +561,18 @@ test "resolve BSD extended member name embedded in payload" {
 }
 
 test "handle 2-byte alignment padding for odd-sized members" {
-    // Member 1 has size = 3 (odd). A padding newline must be skipped before Member 2.
-    // 0..8: ARMAG
-    // 8..68: Member 1 header (size = 3)
-    // 68..71: "ODD"
-    // 71..72: "\n" (padding byte)
-    // 72..132: Member 2 header (size = 4)
-    // 132..136: "EVEN"
     var buf: [136]u8 = undefined;
     @memset(&buf, ' ');
     @memcpy(buf[0..8], ARMAG);
 
-    // Member 1
+    // Member 1 (size = 3)
     @memcpy(buf[8..14], "odd.o/");
     @memcpy(buf[56..57], "3");
     @memcpy(buf[66..68], ARFMAG);
     @memcpy(buf[68..71], "ODD");
     buf[71] = '\n';
 
-    // Member 2
+    // Member 2 (size = 4)
     @memcpy(buf[72..79], "even.o/");
     @memcpy(buf[120..121], "4");
     @memcpy(buf[130..132], ARFMAG);
@@ -434,4 +592,87 @@ test "handle 2-byte alignment padding for odd-sized members" {
     try std.testing.expectEqual(@as(usize, 132), m2.data_offset);
 
     try std.testing.expect((try iter.next()) == null);
+}
+
+test "parse GNU symbol table with multiple big-endian symbols" {
+    // Layout:
+    // 0..4: nsyms = 2 (big-endian)
+    // 4..8: offset[0] = 0x200 (big-endian)
+    // 8..12: offset[1] = 0x400 (big-endian)
+    // 12..30: "func_one\x00func_two\x00" (18 bytes)
+    var symtab_buf: [30]u8 = undefined;
+    @memset(&symtab_buf, 0);
+
+    std.mem.writeInt(u32, symtab_buf[0..4], 2, .big);
+    std.mem.writeInt(u32, symtab_buf[4..8], 0x200, .big);
+    std.mem.writeInt(u32, symtab_buf[8..12], 0x400, .big);
+    @memcpy(symtab_buf[12..30], "func_one\x00func_two\x00");
+
+    const index = try SymbolIndex.parse(&symtab_buf, .gnu);
+    try std.testing.expectEqual(@as(usize, 2), index.symbol_count);
+
+    var iter = index.iterator();
+
+    const s1 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("func_one", s1.name);
+    try std.testing.expectEqual(@as(usize, 0x200), s1.member_offset);
+
+    const s2 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("func_two", s2.name);
+    try std.testing.expectEqual(@as(usize, 0x400), s2.member_offset);
+
+    try std.testing.expect((try iter.next()) == null);
+
+    // Lookup functions
+    try std.testing.expectEqual(@as(usize, 0x400), (try index.findSymbol("func_two")).?);
+    try std.testing.expect((try index.findSymbol("nonexistent")) == null);
+}
+
+test "parse BSD __.SYMDEF symbol table" {
+    // Layout:
+    // 0..4: ranlib_size = 16 (2 entries * 8 bytes, little-endian)
+    // 4..8: ran_strx[0] = 0
+    // 8..12: ran_off[0] = 0x120
+    // 12..16: ran_strx[1] = 10
+    // 16..20: ran_off[1] = 0x240
+    // 20..24: strsize = 20 (little-endian)
+    // 24..44: "apple_one\x00apple_two\x00" (20 bytes)
+    var bsd_buf: [44]u8 = undefined;
+    @memset(&bsd_buf, 0);
+
+    std.mem.writeInt(u32, bsd_buf[0..4], 16, .little);
+    std.mem.writeInt(u32, bsd_buf[4..8], 0, .little);
+    std.mem.writeInt(u32, bsd_buf[8..12], 0x120, .little);
+    std.mem.writeInt(u32, bsd_buf[12..16], 10, .little);
+    std.mem.writeInt(u32, bsd_buf[16..20], 0x240, .little);
+
+    std.mem.writeInt(u32, bsd_buf[20..24], 20, .little);
+    @memcpy(bsd_buf[24..44], "apple_one\x00apple_two\x00");
+
+    const index = try SymbolIndex.parse(&bsd_buf, .bsd);
+    try std.testing.expectEqual(@as(usize, 2), index.symbol_count);
+
+    var iter = index.iterator();
+
+    const s1 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("apple_one", s1.name);
+    try std.testing.expectEqual(@as(usize, 0x120), s1.member_offset);
+
+    const s2 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("apple_two", s2.name);
+    try std.testing.expectEqual(@as(usize, 0x240), s2.member_offset);
+
+    try std.testing.expect((try iter.next()) == null);
+
+    try std.testing.expectEqual(@as(usize, 0x120), (try index.findSymbol("apple_one")).?);
+}
+
+test "reject truncated archive symbol table" {
+    var bad_gnu: [6]u8 = undefined;
+    std.mem.writeInt(u32, bad_gnu[0..4], 10, .big); // claims 10 symbols, but buffer is only 6 bytes
+    try std.testing.expectError(error.TruncatedSymbolTable, SymbolIndex.parse(&bad_gnu, .gnu));
+
+    var bad_bsd: [6]u8 = undefined;
+    std.mem.writeInt(u32, bad_bsd[0..4], 7, .little); // not a multiple of 8
+    try std.testing.expectError(error.InvalidSymbolTable, SymbolIndex.parse(&bad_bsd, .bsd));
 }

@@ -336,6 +336,29 @@ pub fn main(init: std.process.Init) !void {
                 mapped.size,
             });
 
+            // Phase 5.2: Parse and display symbol index
+            if (ar.getSymbolIndex() catch null) |sym_index| {
+                std.debug.print("      -> Symbol Index ({s}): {d} symbols\n", .{
+                    @tagName(sym_index.kind),
+                    sym_index.symbol_count,
+                });
+
+                const print_limit = @min(sym_index.symbol_count, 6);
+                var sym_iter = sym_index.iterator();
+                var s_idx: usize = 0;
+                while (sym_iter.next() catch null) |sym| : (s_idx += 1) {
+                    if (s_idx >= print_limit) break;
+                    std.debug.print("          [{d:2}] {s:<32} -> member at 0x{x:<6}\n", .{
+                        s_idx,
+                        sym.name,
+                        sym.member_offset,
+                    });
+                }
+                if (sym_index.symbol_count > print_limit) {
+                    std.debug.print("          ... and {d} more archive symbols\n", .{sym_index.symbol_count - print_limit});
+                }
+            }
+
             var iter = ar.iterator();
             var member_idx: usize = 0;
             while (iter.next() catch null) |member| : (member_idx += 1) {
