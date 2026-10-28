@@ -171,7 +171,6 @@ pub fn main(init: std.process.Init) !void {
                 macho_hdr.isPie(),
             });
 
-            // Pre-scan to find LC_SYMTAB so section relocations can resolve symbol names
             var cached_symtab: ?sibl.MachoSymtabCommand = null;
             if (macho_hdr.loadCommands(mapped.data)) |mut_prescan| {
                 var prescan = mut_prescan;
@@ -185,7 +184,6 @@ pub fn main(init: std.process.Init) !void {
 
             const sym_strtab = if (cached_symtab) |st| st.getStringTable(mapped.data) else &.{};
 
-            // Main pass: decode commands, sections, and relocations
             if (macho_hdr.loadCommands(mapped.data)) |mut_iter| {
                 var iter = mut_iter;
                 var cmd_idx: usize = 0;
@@ -216,7 +214,6 @@ pub fn main(init: std.process.Init) !void {
                                         sec.nreloc,
                                     });
 
-                                    // Phase 4.5: Print sample relocations belonging to this section
                                     if (sec.nreloc > 0) {
                                         const print_limit = @min(sec.nreloc, 3);
                                         var r_idx: usize = 0;
@@ -330,6 +327,36 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             } else |_| {}
+        }
+        // 4. Check if file is Static Archive (.a / .lib)
+        else if (sibl.archive.Archive.parse(mapped.data) catch null) |ar| {
+            std.debug.print("    - {s} [Archive {s}] ({d} bytes mapped)\n", .{
+                file_path,
+                if (ar.is_thin) "thin" else "static",
+                mapped.size,
+            });
+
+            var iter = ar.iterator();
+            var member_idx: usize = 0;
+            while (iter.next() catch null) |member| : (member_idx += 1) {
+                const name = member.getName(mapped.data, ar.gnu_strtab) catch "<unnamed>";
+                const data = member.getData(mapped.data) catch &.{};
+
+                var role: []const u8 = "object";
+                if (member.isGnuSymbolTable() or member.isBsdSymbolTable(mapped.data)) {
+                    role = "symtab";
+                } else if (member.isGnuStringTable()) {
+                    role = "strtab";
+                }
+
+                std.debug.print("      [{d:2}] {s:<24} size=0x{x:<6} role={s:<7} offset=0x{x:<6}\n", .{
+                    member_idx,
+                    name,
+                    data.len,
+                    role,
+                    member.data_offset,
+                });
+            }
         } else {
             std.debug.print("    - {s} ({d} bytes mapped, non-binary/unknown)\n", .{ file_path, mapped.size });
         }

@@ -31,6 +31,9 @@ pub const coff = @import("coff.zig");
 /// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1 - 4.5).
 pub const macho = @import("macho.zig");
 
+/// Static archive (.a and .lib) parsing (Phase 5.1).
+pub const archive = @import("archive.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -122,6 +125,14 @@ pub const macho_nlist_type = macho.nlist_type;
 pub const macho_nlist_desc = macho.nlist_desc;
 pub const macho_reloc_constants = macho.reloc_constants;
 
+// Archive types
+pub const Archive = archive.Archive;
+pub const ArchiveMemberHeader = archive.MemberHeader;
+pub const ArchiveMemberIterator = archive.MemberIterator;
+pub const ArchiveError = archive.Error;
+pub const archive_magic = archive.ARMAG;
+pub const archive_thin_magic = archive.THIN_ARMAG;
+
 // === Test Suite Runner ===
 
 test {
@@ -133,4 +144,5 @@ test {
     _ = strtab;
     _ = coff;
     _ = macho;
+    _ = archive;
 }
