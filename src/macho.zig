@@ -1,7 +1,7 @@
-//! Phase 4.1 - 4.3: Mach-O Header, Load Commands, and Section Parser for sibl.
+//! Phase 4.1 - 4.4: Mach-O Header, Load Commands, Sections, and Nlist Symbol Reader.
 //!
 //! Provides zero-copy parsing for 32-bit and 64-bit Mach-O binaries,
-//! load command decoding, and section extraction from LC_SEGMENT_64 commands.
+//! load command decoding, section extraction, and nlist_64 symbol table parsing.
 
 const std = @import("std");
 
@@ -308,6 +308,45 @@ pub const vm_prot = struct {
     pub const EXECUTE: u32 = 0x4;
 };
 
+// === Nlist Symbol Table Constants ===
+
+/// Bitmasks for n_type field in nlist_64.
+pub const nlist_masks = struct {
+    pub const STAB: u8 = 0xE0; // Symbolic debugging entries
+    pub const PEXT: u8 = 0x10; // Private external symbol bit
+    pub const TYPE: u8 = 0x0E; // Mask for symbol type
+    pub const EXT: u8 = 0x01; // External symbol bit (global linkage)
+};
+
+/// Symbol types for n_type field in nlist_64.
+pub const nlist_type = struct {
+    pub const UNDF: u8 = 0x0; // Undefined symbol (or COMMON if n_value > 0)
+    pub const ABS: u8 = 0x2; // Absolute symbol (not relocated)
+    pub const SECT: u8 = 0xE; // Defined in section number n_sect
+    pub const PBUD: u8 = 0xC; // Prebound undefined
+    pub const INDR: u8 = 0xA; // Indirect symbol (alias to another symbol)
+};
+
+/// Reference flags and attributes for n_desc field in nlist_64.
+pub const nlist_desc = struct {
+    pub const REFERENCE_TYPE_MASK: u16 = 0x0007;
+    pub const REFERENCE_FLAG_UNDEFINED_NON_LAZY: u16 = 0x0000;
+    pub const REFERENCE_FLAG_UNDEFINED_LAZY: u16 = 0x0001;
+    pub const REFERENCE_FLAG_DEFINED: u16 = 0x0002;
+    pub const REFERENCE_FLAG_PRIVATE_DEFINED: u16 = 0x0003;
+    pub const REFERENCE_FLAG_PRIVATE_UNDEFINED_LAZY: u16 = 0x0004;
+    pub const REFERENCE_FLAG_PRIVATE_UNDEFINED_NON_LAZY: u16 = 0x0005;
+
+    pub const ARM_THUMB_DEF: u16 = 0x0008;
+    pub const NO_DEAD_STRIP: u16 = 0x0020;
+    pub const WEAK_REF: u16 = 0x0040; // Weak reference
+    pub const WEAK_DEF: u16 = 0x0080; // Weak definition
+    pub const REF_TO_WEAK: u16 = 0x0080;
+    pub const SYMBOL_RESOLVER: u16 = 0x0100;
+    pub const ALT_ENTRY: u16 = 0x0200;
+    pub const COLD_FUNC: u16 = 0x0400;
+};
+
 // === Error Sets ===
 
 pub const Error = error{
@@ -326,6 +365,12 @@ pub const SectionError = error{
     TruncatedSectionTable,
     InvalidSectionIndex,
     InvalidSectionSize,
+};
+
+pub const SymbolError = error{
+    TruncatedSymbolTable,
+    InvalidSymbolIndex,
+    StringTableOutOfBounds,
 };
 
 // === Decoded Section 64 Structure ===
@@ -355,7 +400,6 @@ pub const Section64 = struct {
         return self.raw_segname[0..len];
     }
 
-    /// Calculate alignment in bytes (1 << align_p2).
     pub fn getAlignment(self: *const Section64) u32 {
         if (self.align_p2 >= 31) return 1 << 31;
         return @as(u32, 1) << @intCast(self.align_p2);
@@ -391,6 +435,100 @@ pub const Section64 = struct {
     }
 };
 
+// === Decoded Nlist 64 Symbol Structure ===
+
+/// Normalized representation for a 16-byte Mach-O nlist_64 symbol entry.
+pub const Nlist64 = struct {
+    strx: u32,
+    type_flags: u8,
+    sect: u8,
+    desc: u16,
+    value: u64,
+
+    pub const NO_SECT: u8 = 0;
+
+    pub fn isStab(self: *const Nlist64) bool {
+        return (self.type_flags & nlist_masks.STAB) != 0;
+    }
+
+    pub fn isExternal(self: *const Nlist64) bool {
+        return (self.type_flags & nlist_masks.EXT) != 0;
+    }
+
+    pub fn isPrivateExternal(self: *const Nlist64) bool {
+        return (self.type_flags & nlist_masks.PEXT) != 0;
+    }
+
+    pub fn getType(self: *const Nlist64) u8 {
+        return self.type_flags & nlist_masks.TYPE;
+    }
+
+    pub fn isUndefined(self: *const Nlist64) bool {
+        return !self.isStab() and self.getType() == nlist_type.UNDF and self.value == 0;
+    }
+
+    pub fn isCommon(self: *const Nlist64) bool {
+        return !self.isStab() and self.getType() == nlist_type.UNDF and self.value > 0;
+    }
+
+    pub fn isAbsolute(self: *const Nlist64) bool {
+        return !self.isStab() and self.getType() == nlist_type.ABS;
+    }
+
+    pub fn isSection(self: *const Nlist64) bool {
+        return !self.isStab() and self.getType() == nlist_type.SECT;
+    }
+
+    pub fn isIndirect(self: *const Nlist64) bool {
+        return !self.isStab() and self.getType() == nlist_type.INDR;
+    }
+
+    pub fn isWeakDef(self: *const Nlist64) bool {
+        return (self.desc & nlist_desc.WEAK_DEF) != 0;
+    }
+
+    pub fn isWeakRef(self: *const Nlist64) bool {
+        return (self.desc & nlist_desc.WEAK_REF) != 0;
+    }
+
+    pub fn getLibraryOrdinal(self: *const Nlist64) u8 {
+        return @truncate((self.desc >> 8) & 0xFF);
+    }
+
+    pub fn getName(self: *const Nlist64, strtab_bytes: []const u8) SymbolError![]const u8 {
+        if (self.strx == 0) return "";
+        if (self.strx >= strtab_bytes.len) return error.StringTableOutOfBounds;
+
+        const slice = strtab_bytes[self.strx..];
+        const len = std.mem.indexOfScalar(u8, slice, 0) orelse return error.StringTableOutOfBounds;
+        return slice[0..len];
+    }
+
+    pub fn typeName(self: *const Nlist64) []const u8 {
+        if (self.isStab()) return "STAB";
+        return switch (self.getType()) {
+            nlist_type.UNDF => if (self.value > 0) "COMMON" else "UNDF",
+            nlist_type.ABS => "ABS",
+            nlist_type.SECT => "SECT",
+            nlist_type.PBUD => "PBUD",
+            nlist_type.INDR => "INDR",
+            else => "OTHER",
+        };
+    }
+};
+
+/// Helper to decode a 16-byte nlist_64 entry from raw bytes.
+pub fn parseNlist64(bytes: []const u8, endian: std.builtin.Endian) SymbolError!Nlist64 {
+    if (bytes.len < 16) return error.TruncatedSymbolTable;
+    return .{
+        .strx = std.mem.readInt(u32, bytes[0..][0..4], endian),
+        .type_flags = bytes[4],
+        .sect = bytes[5],
+        .desc = std.mem.readInt(u16, bytes[6..][0..2], endian),
+        .value = std.mem.readInt(u64, bytes[8..][0..8], endian),
+    };
+}
+
 // === Decoded Load Command Structures ===
 
 /// Decoded LC_SEGMENT_64 command (72 bytes header, followed by nsects * 80 bytes).
@@ -423,7 +561,6 @@ pub const Segment64Command = struct {
         return (self.initprot & vm_prot.READ) != 0;
     }
 
-    /// Parse a single section_64 header nested within this segment.
     pub fn parseSection(self: *const Segment64Command, endian: std.builtin.Endian, index: usize) SectionError!Section64 {
         if (index >= self.nsects) return error.InvalidSectionIndex;
         const offset = index * 80;
@@ -431,7 +568,6 @@ pub const Segment64Command = struct {
         return parseSection64(self.sections_data[offset .. offset + 80], endian);
     }
 
-    /// Parse all sections in this segment into an allocated slice.
     pub fn parseAllSections(
         self: *const Segment64Command,
         allocator: std.mem.Allocator,
@@ -480,6 +616,36 @@ pub const SymtabCommand = struct {
     nsyms: u32,
     stroff: u32,
     strsize: u32,
+
+    pub fn getStringTable(self: *const SymtabCommand, file_bytes: []const u8) []const u8 {
+        const start: usize = self.stroff;
+        const end: usize = std.math.add(usize, start, self.strsize) catch return &.{};
+        if (end > file_bytes.len) return &.{};
+        return file_bytes[start..end];
+    }
+
+    pub fn parseSymbol(self: *const SymtabCommand, file_bytes: []const u8, endian: std.builtin.Endian, index: usize) SymbolError!Nlist64 {
+        if (index >= self.nsyms) return error.InvalidSymbolIndex;
+        const offset: usize = self.symoff + (index * 16);
+        if (offset + 16 > file_bytes.len) return error.TruncatedSymbolTable;
+        return parseNlist64(file_bytes[offset .. offset + 16], endian);
+    }
+
+    pub fn parseAllSymbols(
+        self: *const SymtabCommand,
+        allocator: std.mem.Allocator,
+        file_bytes: []const u8,
+        endian: std.builtin.Endian,
+    ) (SymbolError || std.mem.Allocator.Error)![]Nlist64 {
+        const syms = try allocator.alloc(Nlist64, self.nsyms);
+        errdefer allocator.free(syms);
+
+        var i: usize = 0;
+        while (i < self.nsyms) : (i += 1) {
+            syms[i] = try self.parseSymbol(file_bytes, endian, i);
+        }
+        return syms;
+    }
 };
 
 /// Decoded LC_DYSYMTAB command (80 bytes).
@@ -924,7 +1090,7 @@ test "decode LC_SEGMENT_64 load command" {
     std.mem.writeInt(u64, cmd_buf[48..56], 0x4000, .little);
     std.mem.writeInt(u32, cmd_buf[56..60], vm_prot.READ | vm_prot.EXECUTE, .little);
     std.mem.writeInt(u32, cmd_buf[60..64], vm_prot.READ | vm_prot.EXECUTE, .little);
-    std.mem.writeInt(u32, cmd_buf[64..68], 0, .little); // nsects = 0
+    std.mem.writeInt(u32, cmd_buf[64..68], 0, .little);
 
     const lc = LoadCommand{
         .cmd = .segment_64,
@@ -948,12 +1114,12 @@ test "parse 80-byte Mach-O section_64 header" {
 
     @memcpy(sec_buf[0..6], "__text");
     @memcpy(sec_buf[16..22], "__TEXT");
-    std.mem.writeInt(u64, sec_buf[32..40], 0x100001000, .little); // addr
-    std.mem.writeInt(u64, sec_buf[40..48], 0x250, .little); // size
-    std.mem.writeInt(u32, sec_buf[48..52], 0x1000, .little); // offset
-    std.mem.writeInt(u32, sec_buf[52..56], 4, .little); // align_p2 = 4 (16 bytes)
-    std.mem.writeInt(u32, sec_buf[56..60], 0x2000, .little); // reloff
-    std.mem.writeInt(u32, sec_buf[60..64], 12, .little); // nreloc
+    std.mem.writeInt(u64, sec_buf[32..40], 0x100001000, .little);
+    std.mem.writeInt(u64, sec_buf[40..48], 0x250, .little);
+    std.mem.writeInt(u32, sec_buf[48..52], 0x1000, .little);
+    std.mem.writeInt(u32, sec_buf[52..56], 4, .little);
+    std.mem.writeInt(u32, sec_buf[56..60], 0x2000, .little);
+    std.mem.writeInt(u32, sec_buf[60..64], 12, .little);
     const s_flags = @backingInt(SectionType.regular) | section_attributes.PURE_INSTRUCTIONS | section_attributes.SOME_INSTRUCTIONS;
     std.mem.writeInt(u32, sec_buf[64..68], s_flags, .little);
 
@@ -964,7 +1130,7 @@ test "parse 80-byte Mach-O section_64 header" {
     try std.testing.expectEqual(@as(u64, 0x100001000), sec.addr);
     try std.testing.expectEqual(@as(u64, 0x250), sec.size);
     try std.testing.expectEqual(@as(u32, 0x1000), sec.offset);
-    try std.testing.expectEqual(@as(u32, 16), sec.getAlignment()); // 1 << 4 = 16
+    try std.testing.expectEqual(@as(u32, 16), sec.getAlignment());
     try std.testing.expectEqual(@as(u32, 0x2000), sec.reloff);
     try std.testing.expectEqual(@as(u32, 12), sec.nreloc);
     try std.testing.expectEqual(SectionType.regular, sec.getType());
@@ -995,7 +1161,6 @@ test "retrieve section data and zerofill slice" {
     const reg_data = try reg_sec.getData(&file_mock);
     try std.testing.expectEqualStrings("macho_text_bytes", reg_data);
 
-    // Zerofill section returns empty slice without out-of-bounds error
     const zero_sec = Section64{
         .raw_sectname = [_]u8{ '_', '_', 'b', 's', 's', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
         .raw_segname = [_]u8{ '_', '_', 'D', 'A', 'T', 'A', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -1016,23 +1181,20 @@ test "retrieve section data and zerofill slice" {
 }
 
 test "parse nested sections inside Segment64Command" {
-    // 72 bytes segment header + 80 bytes section header = 152 bytes total
     var cmd_buf: [152]u8 = undefined;
     @memset(&cmd_buf, 0);
 
-    // Segment header
     std.mem.writeInt(u32, cmd_buf[0..4], @backingInt(CommandType.segment_64), .little);
     std.mem.writeInt(u32, cmd_buf[4..8], 152, .little);
     @memcpy(cmd_buf[8..14], "__DATA");
-    std.mem.writeInt(u32, cmd_buf[64..68], 1, .little); // nsects = 1
+    std.mem.writeInt(u32, cmd_buf[64..68], 1, .little);
 
-    // Section header at offset 72
     @memcpy(cmd_buf[72..78], "__data");
     @memcpy(cmd_buf[88..94], "__DATA");
-    std.mem.writeInt(u64, cmd_buf[104..112], 0x2000, .little); // addr
-    std.mem.writeInt(u64, cmd_buf[112..120], 0x100, .little); // size
-    std.mem.writeInt(u32, cmd_buf[120..124], 0x800, .little); // offset
-    std.mem.writeInt(u32, cmd_buf[124..128], 3, .little); // align = 3 (8 bytes)
+    std.mem.writeInt(u64, cmd_buf[104..112], 0x2000, .little);
+    std.mem.writeInt(u64, cmd_buf[112..120], 0x100, .little);
+    std.mem.writeInt(u32, cmd_buf[120..124], 0x800, .little);
+    std.mem.writeInt(u32, cmd_buf[124..128], 3, .little);
     std.mem.writeInt(u32, cmd_buf[136..140], @backingInt(SectionType.regular), .little);
 
     const lc = LoadCommand{
@@ -1052,4 +1214,80 @@ test "parse nested sections inside Segment64Command" {
     try std.testing.expectEqual(@as(u64, 0x100), sec.size);
 
     try std.testing.expectError(error.InvalidSectionIndex, seg.parseSection(.little, 1));
+}
+
+test "parse 16-byte Mach-O nlist_64 defined section symbol" {
+    var sym_buf: [16]u8 = undefined;
+    @memset(&sym_buf, 0);
+
+    std.mem.writeInt(u32, sym_buf[0..4], 1, .little); // strx = 1
+    sym_buf[4] = nlist_type.SECT | nlist_masks.EXT; // N_SECT | N_EXT
+    sym_buf[5] = 1; // n_sect = 1 (__text)
+    std.mem.writeInt(u16, sym_buf[6..8], 0, .little); // n_desc = 0
+    std.mem.writeInt(u64, sym_buf[8..16], 0x1000, .little); // n_value = 0x1000
+
+    const sym = try parseNlist64(&sym_buf, .little);
+
+    try std.testing.expect(!sym.isStab());
+    try std.testing.expect(sym.isExternal());
+    try std.testing.expect(!sym.isPrivateExternal());
+    try std.testing.expect(sym.isSection());
+    try std.testing.expect(!sym.isUndefined());
+    try std.testing.expect(!sym.isCommon());
+    try std.testing.expect(!sym.isAbsolute());
+    try std.testing.expectEqual(@as(u8, 1), sym.sect);
+    try std.testing.expectEqual(@as(u64, 0x1000), sym.value);
+    try std.testing.expectEqualStrings("SECT", sym.typeName());
+
+    const strtab_mock = "\x00_foo\x00";
+    try std.testing.expectEqualStrings("_foo", try sym.getName(strtab_mock));
+}
+
+test "parse Mach-O nlist_64 undefined and weak symbols" {
+    // Undefined external symbol with weak ref and library ordinal #2
+    var sym_buf: [16]u8 = undefined;
+    @memset(&sym_buf, 0);
+
+    std.mem.writeInt(u32, sym_buf[0..4], 1, .little); // strx = 1
+    sym_buf[4] = nlist_type.UNDF | nlist_masks.EXT; // N_UNDF | N_EXT
+    sym_buf[5] = Nlist64.NO_SECT;
+    // library ordinal 2 in upper byte, N_WEAK_REF (0x40) in lower byte
+    const desc: u16 = (2 << 8) | nlist_desc.WEAK_REF;
+    std.mem.writeInt(u16, sym_buf[6..8], desc, .little);
+    std.mem.writeInt(u64, sym_buf[8..16], 0, .little); // value = 0
+
+    const sym = try parseNlist64(&sym_buf, .little);
+
+    try std.testing.expect(sym.isUndefined());
+    try std.testing.expect(!sym.isCommon());
+    try std.testing.expect(sym.isWeakRef());
+    try std.testing.expect(!sym.isWeakDef());
+    try std.testing.expectEqual(@as(u8, 2), sym.getLibraryOrdinal());
+    try std.testing.expectEqualStrings("UNDF", sym.typeName());
+}
+
+test "parse Mach-O common and stab symbols" {
+    // COMMON: N_UNDF with value > 0 (size)
+    const common_sym = Nlist64{
+        .strx = 1,
+        .type_flags = nlist_type.UNDF | nlist_masks.EXT,
+        .sect = 0,
+        .desc = 0,
+        .value = 512, // size = 512 bytes
+    };
+    try std.testing.expect(common_sym.isCommon());
+    try std.testing.expect(!common_sym.isUndefined());
+    try std.testing.expectEqualStrings("COMMON", common_sym.typeName());
+
+    // STAB: debug symbol
+    const stab_sym = Nlist64{
+        .strx = 0,
+        .type_flags = 0x64, // N_SO (source file name stab)
+        .sect = 0,
+        .desc = 0,
+        .value = 0,
+    };
+    try std.testing.expect(stab_sym.isStab());
+    try std.testing.expectEqualStrings("STAB", stab_sym.typeName());
+    try std.testing.expectEqualStrings("", try stab_sym.getName(""));
 }

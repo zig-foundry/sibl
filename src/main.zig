@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
                 macho_hdr.isPie(),
             });
 
-            // Phase 4.2 & 4.3: Decode load commands and parse nested sections
+            // Decode load commands
             if (macho_hdr.loadCommands(mapped.data)) |mut_iter| {
                 var iter = mut_iter;
                 var cmd_idx: usize = 0;
@@ -189,7 +189,6 @@ pub fn main(init: std.process.Init) !void {
                                     seg.nsects,
                                 });
 
-                                // Phase 4.3: Parse and print sections in this segment
                                 var s_idx: usize = 0;
                                 while (s_idx < seg.nsects) : (s_idx += 1) {
                                     const sec = seg.parseSection(macho_hdr.endian, s_idx) catch continue;
@@ -206,15 +205,39 @@ pub fn main(init: std.process.Init) !void {
                             } else |_| {}
                         },
                         .symtab => {
-                            if (lc.asSymtab(macho_hdr.endian)) |sym| {
+                            if (lc.asSymtab(macho_hdr.endian)) |sym_cmd| {
                                 std.debug.print("      [{d:2}] {s:<14} symoff=0x{x:<8} nsyms={d:<6} stroff=0x{x:<8} strsz=0x{x}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
-                                    sym.symoff,
-                                    sym.nsyms,
-                                    sym.stroff,
-                                    sym.strsize,
+                                    sym_cmd.symoff,
+                                    sym_cmd.nsyms,
+                                    sym_cmd.stroff,
+                                    sym_cmd.strsize,
                                 });
+
+                                // Phase 4.4: Read and print nlist_64 symbols
+                                const strtab = sym_cmd.getStringTable(mapped.data);
+                                const print_limit = @min(sym_cmd.nsyms, 8);
+                                var sym_idx: usize = 0;
+                                while (sym_idx < print_limit) : (sym_idx += 1) {
+                                    const sym = sym_cmd.parseSymbol(mapped.data, macho_hdr.endian, sym_idx) catch break;
+                                    const name = sym.getName(strtab) catch "<unnamed>";
+
+                                    std.debug.print("          -> ({d:2}) {s:<28} val=0x{x:<8} sec={d:<2} type={s:<6} {s}{s}{s}\n", .{
+                                        sym_idx,
+                                        if (name.len == 0) "<empty>" else name,
+                                        sym.value,
+                                        sym.sect,
+                                        sym.typeName(),
+                                        if (sym.isExternal()) "EXT " else "",
+                                        if (sym.isPrivateExternal()) "PEXT " else "",
+                                        if (sym.isWeakDef()) "WEAK_DEF" else if (sym.isWeakRef()) "WEAK_REF" else "",
+                                    });
+                                }
+
+                                if (sym_cmd.nsyms > print_limit) {
+                                    std.debug.print("          -> ... and {d} more symbols\n", .{sym_cmd.nsyms - print_limit});
+                                }
                             } else |_| {}
                         },
                         .dysymtab => {
