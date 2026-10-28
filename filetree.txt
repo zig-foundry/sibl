@@ -3,6 +3,7 @@ sibl/
 ├── build.zig.zon
 └── src/
     ├── alloc.zig
+    ├── archive.zig
     ├── args.zig
     ├── coff.zig
     ├── elf.zig
