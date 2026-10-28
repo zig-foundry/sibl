@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
                 macho_hdr.isPie(),
             });
 
-            // Phase 4.2: Decode and print load commands
+            // Phase 4.2 & 4.3: Decode load commands and parse nested sections
             if (macho_hdr.loadCommands(mapped.data)) |mut_iter| {
                 var iter = mut_iter;
                 var cmd_idx: usize = 0;
@@ -179,19 +179,35 @@ pub fn main(init: std.process.Init) !void {
                     switch (lc.cmd) {
                         .segment_64 => {
                             if (lc.asSegment64(macho_hdr.endian)) |seg| {
-                                std.debug.print("      [{d:2}] {s:<18} segname={s:<14} vmaddr=0x{x:<9} vmsz=0x{x:<7} nsects={d}\n", .{
+                                const seg_name = seg.getName();
+                                std.debug.print("      [{d:2}] {s:<14} {s:<16} vmaddr=0x{x:<9} vmsz=0x{x:<7} nsects={d}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
-                                    seg.getName(),
+                                    if (seg_name.len == 0) "<unnamed>" else seg_name,
                                     seg.vmaddr,
                                     seg.vmsize,
                                     seg.nsects,
                                 });
+
+                                // Phase 4.3: Parse and print sections in this segment
+                                var s_idx: usize = 0;
+                                while (s_idx < seg.nsects) : (s_idx += 1) {
+                                    const sec = seg.parseSection(macho_hdr.endian, s_idx) catch continue;
+                                    std.debug.print("          [{d:2}] {s:<16} addr=0x{x:<9} size=0x{x:<7} align={d:<3} type={s:<14} relocs={d}\n", .{
+                                        s_idx,
+                                        sec.getSectName(),
+                                        sec.addr,
+                                        sec.size,
+                                        sec.getAlignment(),
+                                        sec.getType().name(),
+                                        sec.nreloc,
+                                    });
+                                }
                             } else |_| {}
                         },
                         .symtab => {
                             if (lc.asSymtab(macho_hdr.endian)) |sym| {
-                                std.debug.print("      [{d:2}] {s:<18} symoff=0x{x:<8} nsyms={d:<6} stroff=0x{x:<8} strsz=0x{x}\n", .{
+                                std.debug.print("      [{d:2}] {s:<14} symoff=0x{x:<8} nsyms={d:<6} stroff=0x{x:<8} strsz=0x{x}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
                                     sym.symoff,
@@ -203,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
                         },
                         .dysymtab => {
                             if (lc.asDysymtab(macho_hdr.endian)) |dysym| {
-                                std.debug.print("      [{d:2}] {s:<18} locals={d} extdef={d} undef={d} indirect={d}\n", .{
+                                std.debug.print("      [{d:2}] {s:<14} locals={d} extdef={d} undef={d} indirect={d}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
                                     dysym.nlocalsym,
@@ -215,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
                         },
                         .main => {
                             if (lc.asMain(macho_hdr.endian)) |m| {
-                                std.debug.print("      [{d:2}] {s:<18} entryoff=0x{x} stacksize=0x{x}\n", .{
+                                std.debug.print("      [{d:2}] {s:<14} entryoff=0x{x} stacksize=0x{x}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
                                     m.entryoff,
@@ -226,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
                         .load_dylib, .load_weak_dylib, .id_dylib => {
                             if (lc.asDylib(macho_hdr.endian)) |dyl| {
                                 const dyl_name = dyl.getName() orelse "<unknown>";
-                                std.debug.print("      [{d:2}] {s:<18} dylib={s}\n", .{
+                                std.debug.print("      [{d:2}] {s:<14} dylib={s}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
                                     dyl_name,
@@ -235,7 +251,7 @@ pub fn main(init: std.process.Init) !void {
                         },
                         .build_version => {
                             if (lc.asBuildVersion(macho_hdr.endian)) |bv| {
-                                std.debug.print("      [{d:2}] {s:<18} platform={s} minos=0x{x} sdk=0x{x}\n", .{
+                                std.debug.print("      [{d:2}] {s:<14} platform={s} minos=0x{x} sdk=0x{x}\n", .{
                                     cmd_idx,
                                     lc.cmd.name(),
                                     bv.platformName(),
@@ -244,13 +260,7 @@ pub fn main(init: std.process.Init) !void {
                                 });
                             } else |_| {}
                         },
-                        else => {
-                            std.debug.print("      [{d:2}] {s:<18} size={d} bytes\n", .{
-                                cmd_idx,
-                                lc.cmd.name(),
-                                lc.cmdsize,
-                            });
-                        },
+                        else => {},
                     }
                 }
             } else |_| {}

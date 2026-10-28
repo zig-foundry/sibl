@@ -28,7 +28,7 @@ pub const strtab = @import("strtab.zig");
 /// PE and COFF parsing for Windows targets (Phase 3.1 - 3.5).
 pub const coff = @import("coff.zig");
 
-/// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1 & 4.2).
+/// Mach-O parsing for macOS and Apple Silicon targets (Phase 4.1 - 4.3).
 pub const macho = @import("macho.zig");
 
 // === Re-exported Types and Functions ===
@@ -103,6 +103,8 @@ pub const MachoCommandType = macho.CommandType;
 pub const MachoLoadCommand = macho.LoadCommand;
 pub const MachoLoadCommandIterator = macho.LoadCommandIterator;
 pub const MachoSegment64Command = macho.Segment64Command;
+pub const MachoSection64 = macho.Section64;
+pub const MachoSectionType = macho.SectionType;
 pub const MachoSymtabCommand = macho.SymtabCommand;
 pub const MachoDysymtabCommand = macho.DysymtabCommand;
 pub const MachoMainCommand = macho.MainCommand;
@@ -110,6 +112,7 @@ pub const MachoDylibCommand = macho.DylibCommand;
 pub const MachoBuildVersionCommand = macho.BuildVersionCommand;
 pub const macho_flags = macho.flags;
 pub const macho_vm_prot = macho.vm_prot;
+pub const macho_section_attributes = macho.section_attributes;
 
 // === Test Suite Runner ===
 
