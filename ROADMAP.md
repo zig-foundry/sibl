@@ -24,11 +24,11 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 - [x] **3.5 Section Flags Mapping:** Group sections using the `$` rule, classify section kinds, and map permissions.
 
 ## Phase 4: Mach-O Object Parsing
-- [ ] **4.1 Mach Header Parser:** Read 64-bit Mach-O headers and detect CPU architecture.
-- [ ] **4.2 Load Commands Decoder:** Parse `LC_SEGMENT_64`, `LC_SYMTAB`, and `LC_DYSYMTAB` commands.
-- [ ] **4.3 Section Parsing:** Read Mach-O sections inside segments and track their alignment and offsets.
-- [ ] **4.4 Nlist Symbol Reader:** Read Mach-O symbol tables and extract external, local, and undefined symbols.
-- [ ] **4.5 Relocation Info:** Parse standard and scattered relocation entries for macOS targets.
+- [x] **4.1 Mach Header Parser:** Read 64-bit Mach-O headers and detect CPU architecture.
+- [x] **4.2 Load Commands Decoder:** Parse `LC_SEGMENT_64`, `LC_SYMTAB`, and `LC_DYSYMTAB` commands.
+- [x] **4.3 Section Parsing:** Read Mach-O sections inside segments and track their alignment and offsets.
+- [x] **4.4 Nlist Symbol Reader:** Read Mach-O symbol tables and extract external, local, and undefined symbols.
+- [x] **4.5 Relocation Info:** Parse standard and scattered relocation entries for macOS targets.
 
 ## Phase 5: Static Archive Parsing (.a and .lib)
 - [ ] **5.1 Archive Header Validation:** Check the `!<arch>\n` magic bytes and read member headers.
