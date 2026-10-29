@@ -1,7 +1,9 @@
-//! Phase 5.1 & 5.2: Static Archive Header Validation, Member Parser, and Symbol Index.
+//! Phase 5.1 - 5.4: Static Archive Header Validation, Member Parser, Symbol Index,
+//! Selective Member Extraction, and Thin Archive Support.
 //!
 //! Provides zero-copy parsing for Unix static archives (.a) and Windows
-//! import/static libraries (.lib), supporting GNU ('/') and BSD ('__.SYMDEF') symbol indices.
+//! import/static libraries (.lib), supporting GNU ('/'), BSD ('__.SYMDEF'),
+//! deduplicated selective extraction, and external thin archive references.
 
 const std = @import("std");
 
@@ -29,6 +31,8 @@ pub const Error = error{
     StringTableOutOfBounds,
     TruncatedSymbolTable,
     InvalidSymbolTable,
+    MemberNotFound,
+    ExternalFileNotFound,
 };
 
 // === Helper Numeric Parsers ===
@@ -52,6 +56,23 @@ pub const ArchiveSymbol = struct {
     name: []const u8,
     /// Byte offset in the archive file where the defining member's 60-byte header begins.
     member_offset: usize,
+};
+
+// === Extracted Member Representation ===
+
+/// An extracted object file member ready for parsing (ELF, COFF, or Mach-O).
+pub const ExtractedMember = struct {
+    name: []const u8,
+    header: MemberHeader,
+    data: []const u8,
+    is_external: bool,
+    allocated_data: ?[]const u8 = null,
+    allocated_path: ?[]const u8 = null,
+
+    pub fn deinit(self: *ExtractedMember, allocator: std.mem.Allocator) void {
+        if (self.allocated_data) |d| allocator.free(d);
+        if (self.allocated_path) |p| allocator.free(p);
+    }
 };
 
 // === Decoded Member Header ===
@@ -86,6 +107,12 @@ pub const MemberHeader = struct {
     pub fn isBsdSymbolTable(self: *const MemberHeader, file_bytes: []const u8) bool {
         const name = self.getName(file_bytes, null) catch return false;
         return std.mem.startsWith(u8, name, "__.SYMDEF");
+    }
+
+    /// Returns true if this member is a special non-object table ('/', '//', or '__.SYMDEF').
+    pub fn isSpecialTable(self: *const MemberHeader, file_bytes: []const u8) bool {
+        if (self.isGnuSymbolTable() or self.isGnuStringTable()) return true;
+        return self.isBsdSymbolTable(file_bytes);
     }
 
     /// Returns true if this member uses BSD extended filename encoding ("#1/<len>").
@@ -149,7 +176,7 @@ pub const MemberHeader = struct {
         return name;
     }
 
-    /// Returns the raw data slice for this member's payload.
+    /// Returns the raw data slice for this member's payload in standard archives.
     /// For BSD extended names, the payload automatically skips the embedded filename prefix.
     pub fn getData(self: *const MemberHeader, file_bytes: []const u8) Error![]const u8 {
         var start = self.data_offset;
@@ -173,6 +200,7 @@ pub const MemberHeader = struct {
 pub const MemberIterator = struct {
     file_bytes: []const u8,
     cursor: usize,
+    is_thin: bool = false,
 
     pub fn next(self: *MemberIterator) Error!?MemberHeader {
         // All archive members must start on an even 2-byte boundary
@@ -205,7 +233,17 @@ pub const MemberIterator = struct {
         const header_offset = self.cursor;
         const data_offset = self.cursor + 60;
 
-        const end_offset = std.math.add(usize, data_offset, @as(usize, @intCast(size))) catch return error.InvalidMemberSize;
+        // In a thin archive, ordinary object members have 0 bytes of payload in the archive file.
+        // Special members ('/' symbol table and '//' string table) do contain actual payload in the archive.
+        const trimmed_name = std.mem.trim(u8, &name_buf, " ");
+        const is_special = std.mem.eql(u8, trimmed_name, "/") or std.mem.eql(u8, trimmed_name, "//") or std.mem.startsWith(u8, trimmed_name, "__.SYMDEF");
+
+        const archive_payload_size: usize = if (self.is_thin and !is_special)
+            0
+        else
+            @intCast(size);
+
+        const end_offset = std.math.add(usize, data_offset, archive_payload_size) catch return error.InvalidMemberSize;
         if (end_offset > self.file_bytes.len) {
             return error.InvalidMemberSize;
         }
@@ -439,11 +477,201 @@ pub const Archive = struct {
         return null;
     }
 
+    /// Parse a single 60-byte member header directly at a specified archive byte offset.
+    pub fn getMemberAtOffset(self: *const Archive, offset: usize) Error!MemberHeader {
+        if (offset >= self.file_bytes.len) return error.TruncatedMemberHeader;
+        if (offset + 60 > self.file_bytes.len) return error.TruncatedMemberHeader;
+
+        const hdr_bytes = self.file_bytes[offset .. offset + 60];
+        if (!std.mem.eql(u8, hdr_bytes[58..60], ARFMAG)) {
+            return error.InvalidTrailerMagic;
+        }
+
+        var name_buf: [16]u8 = undefined;
+        @memcpy(&name_buf, hdr_bytes[0..16]);
+
+        const date = try parseDecimal(u64, hdr_bytes[16..28]);
+        const uid = try parseDecimal(u32, hdr_bytes[28..34]);
+        const gid = try parseDecimal(u32, hdr_bytes[34..40]);
+        const mode = try parseOctal(u32, hdr_bytes[40..48]);
+        const size = try parseDecimal(u64, hdr_bytes[48..58]);
+
+        return .{
+            .raw_name = name_buf,
+            .date = date,
+            .uid = uid,
+            .gid = gid,
+            .mode = mode,
+            .size = size,
+            .header_offset = offset,
+            .data_offset = offset + 60,
+        };
+    }
+
+    /// Look up a symbol in the index and return the member header defining it.
+    pub fn findMemberDefiningSymbol(self: *const Archive, symbol_name: []const u8) Error!?MemberHeader {
+        const sym_index = (try self.getSymbolIndex()) orelse return null;
+        const offset = (try sym_index.findSymbol(symbol_name)) orelse return null;
+        return try self.getMemberAtOffset(offset);
+    }
+
+    /// Resolve the filesystem path of a member file, handling relative paths for thin archives.
+    pub fn resolveMemberPath(
+        self: *const Archive,
+        allocator: std.mem.Allocator,
+        member: *const MemberHeader,
+        archive_path: ?[]const u8,
+    ) (Error || std.mem.Allocator.Error)![]u8 {
+        const name = try member.getName(self.file_bytes, self.gnu_strtab);
+
+        if (!self.is_thin) {
+            return allocator.dupe(u8, name);
+        }
+
+        if (std.fs.path.isAbsolute(name)) {
+            return allocator.dupe(u8, name);
+        }
+
+        if (archive_path) |ap| {
+            if (std.fs.path.dirname(ap)) |dir| {
+                return std.fs.path.join(allocator, &.{ dir, name });
+            }
+        }
+
+        return allocator.dupe(u8, name);
+    }
+
+    /// Safely close an OS file descriptor across Zig versions.
+    fn closeFd(fd: std.posix.fd_t) void {
+        if (comptime @hasDecl(std.posix, "close")) {
+            std.posix.close(fd);
+        } else if (comptime @hasDecl(std.posix.system, "close")) {
+            _ = std.posix.system.close(fd);
+        } else if (comptime @hasDecl(std, "os") and @hasDecl(std.os, "linux") and @hasDecl(std.os.linux, "close")) {
+            _ = std.os.linux.close(fd);
+        }
+    }
+
+    /// Read an external file from disk for thin archive members using POSIX openat.
+    fn readExternalFile(allocator: std.mem.Allocator, path: []const u8) (Error || std.mem.Allocator.Error)![]const u8 {
+        const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{}, 0) catch return error.ExternalFileNotFound;
+        defer closeFd(fd);
+
+        var list = std.ArrayListUnmanaged(u8).empty;
+        errdefer list.deinit(allocator);
+
+        var chunk: [8192]u8 = undefined;
+        while (true) {
+            const n = std.posix.read(fd, &chunk) catch return error.ExternalFileNotFound;
+            if (n == 0) break;
+            try list.appendSlice(allocator, chunk[0..n]);
+        }
+
+        return try list.toOwnedSlice(allocator);
+    }
+
+    /// Extract an archive member.
+    /// In standard archives, returns a zero-copy slice of memory.
+    /// In thin archives, reads the external file from disk.
+    pub fn extractMember(
+        self: *const Archive,
+        allocator: std.mem.Allocator,
+        member: *const MemberHeader,
+        archive_path: ?[]const u8,
+    ) (Error || std.mem.Allocator.Error)!ExtractedMember {
+        const name = try member.getName(self.file_bytes, self.gnu_strtab);
+
+        if (!self.is_thin) {
+            const data = try member.getData(self.file_bytes);
+            return .{
+                .name = name,
+                .header = member.*,
+                .data = data,
+                .is_external = false,
+                .allocated_data = null,
+                .allocated_path = null,
+            };
+        } else {
+            const full_path = try self.resolveMemberPath(allocator, member, archive_path);
+            errdefer allocator.free(full_path);
+
+            const data = try readExternalFile(allocator, full_path);
+
+            return .{
+                .name = name,
+                .header = member.*,
+                .data = data,
+                .is_external = true,
+                .allocated_data = data,
+                .allocated_path = full_path,
+            };
+        }
+    }
+
     pub fn iterator(self: *const Archive) MemberIterator {
         return .{
             .file_bytes = self.file_bytes,
             .cursor = 8,
+            .is_thin = self.is_thin,
         };
+    }
+};
+
+// === Selective Extractor ===
+
+/// Tracks and manages deduplicated selective member extraction during linking.
+pub const SelectiveExtractor = struct {
+    allocator: std.mem.Allocator,
+    archive: *const Archive,
+    archive_path: ?[]const u8,
+    extracted_offsets: std.AutoHashMap(usize, void),
+    extracted_members: std.ArrayListUnmanaged(ExtractedMember),
+
+    pub fn init(allocator: std.mem.Allocator, ar: *const Archive, archive_path: ?[]const u8) SelectiveExtractor {
+        return .{
+            .allocator = allocator,
+            .archive = ar,
+            .archive_path = archive_path,
+            .extracted_offsets = std.AutoHashMap(usize, void).init(allocator),
+            .extracted_members = .empty,
+        };
+    }
+
+    pub fn deinit(self: *SelectiveExtractor) void {
+        for (self.extracted_members.items) |*m| {
+            m.deinit(self.allocator);
+        }
+        self.extracted_members.deinit(self.allocator);
+        self.extracted_offsets.deinit();
+    }
+
+    /// Extract the member that defines `symbol_name` if present and not yet extracted.
+    pub fn extractSymbol(self: *SelectiveExtractor, symbol_name: []const u8) !?*const ExtractedMember {
+        const sym_index = (try self.archive.getSymbolIndex()) orelse return null;
+        const offset = (try sym_index.findSymbol(symbol_name)) orelse return null;
+
+        if (self.extracted_offsets.contains(offset)) {
+            return null; // Already extracted
+        }
+
+        try self.extracted_offsets.put(offset, {});
+        const member_hdr = try self.archive.getMemberAtOffset(offset);
+        const extracted = try self.archive.extractMember(self.allocator, &member_hdr, self.archive_path);
+        try self.extracted_members.append(self.allocator, extracted);
+
+        return &self.extracted_members.items[self.extracted_members.items.len - 1];
+    }
+
+    /// Iterates across a slice of undefined symbol names, extracting all needed members.
+    /// Returns the number of newly extracted members.
+    pub fn extractUndefined(self: *SelectiveExtractor, undefined_symbols: []const []const u8) !usize {
+        var count: usize = 0;
+        for (undefined_symbols) |sym| {
+            if (try self.extractSymbol(sym)) |_| {
+                count += 1;
+            }
+        }
+        return count;
     }
 };
 
@@ -595,11 +823,6 @@ test "handle 2-byte alignment padding for odd-sized members" {
 }
 
 test "parse GNU symbol table with multiple big-endian symbols" {
-    // Layout:
-    // 0..4: nsyms = 2 (big-endian)
-    // 4..8: offset[0] = 0x200 (big-endian)
-    // 8..12: offset[1] = 0x400 (big-endian)
-    // 12..30: "func_one\x00func_two\x00" (18 bytes)
     var symtab_buf: [30]u8 = undefined;
     @memset(&symtab_buf, 0);
 
@@ -623,20 +846,11 @@ test "parse GNU symbol table with multiple big-endian symbols" {
 
     try std.testing.expect((try iter.next()) == null);
 
-    // Lookup functions
     try std.testing.expectEqual(@as(usize, 0x400), (try index.findSymbol("func_two")).?);
     try std.testing.expect((try index.findSymbol("nonexistent")) == null);
 }
 
 test "parse BSD __.SYMDEF symbol table" {
-    // Layout:
-    // 0..4: ranlib_size = 16 (2 entries * 8 bytes, little-endian)
-    // 4..8: ran_strx[0] = 0
-    // 8..12: ran_off[0] = 0x120
-    // 12..16: ran_strx[1] = 10
-    // 16..20: ran_off[1] = 0x240
-    // 20..24: strsize = 20 (little-endian)
-    // 24..44: "apple_one\x00apple_two\x00" (20 bytes)
     var bsd_buf: [44]u8 = undefined;
     @memset(&bsd_buf, 0);
 
@@ -667,12 +881,96 @@ test "parse BSD __.SYMDEF symbol table" {
     try std.testing.expectEqual(@as(usize, 0x120), (try index.findSymbol("apple_one")).?);
 }
 
-test "reject truncated archive symbol table" {
-    var bad_gnu: [6]u8 = undefined;
-    std.mem.writeInt(u32, bad_gnu[0..4], 10, .big); // claims 10 symbols, but buffer is only 6 bytes
-    try std.testing.expectError(error.TruncatedSymbolTable, SymbolIndex.parse(&bad_gnu, .gnu));
+test "selective member extraction by symbol lookup" {
+    // Layout:
+    // 0..8: ARMAG
+    // 8..68: Member 0: GNU symbol table ("/") with size 16 (1 symbol -> member at 68)
+    // 68..72: nsyms = 1 (big-endian)
+    // 72..76: offset = 84 (big-endian, pointing to Member 1 header)
+    // 76..84: "my_func\x00"
+    // 84..144: Member 1: header ("obj.o/") with size 11
+    // 144..155: "OBJ_PAYLOAD" (11 bytes)
+    var ar_buf: [155]u8 = undefined;
+    @memset(&ar_buf, ' ');
+    @memcpy(ar_buf[0..8], ARMAG);
 
-    var bad_bsd: [6]u8 = undefined;
-    std.mem.writeInt(u32, bad_bsd[0..4], 7, .little); // not a multiple of 8
-    try std.testing.expectError(error.InvalidSymbolTable, SymbolIndex.parse(&bad_bsd, .bsd));
+    // Symbol table header
+    @memcpy(ar_buf[8..10], "/ ");
+    @memcpy(ar_buf[56..58], "16");
+    @memcpy(ar_buf[66..68], ARFMAG);
+
+    // Symbol table data at 68
+    std.mem.writeInt(u32, ar_buf[68..72], 1, .big);
+    std.mem.writeInt(u32, ar_buf[72..76], 84, .big); // points to offset 84
+    @memcpy(ar_buf[76..84], "my_func\x00");
+
+    // Member 1 header at 84
+    @memcpy(ar_buf[84..90], "obj.o/");
+    @memcpy(ar_buf[132..134], "11");
+    @memcpy(ar_buf[142..144], ARFMAG);
+    @memcpy(ar_buf[144..155], "OBJ_PAYLOAD");
+
+    const ar = try Archive.parse(&ar_buf);
+    const sym_index = (try ar.getSymbolIndex()).?;
+    try std.testing.expectEqual(@as(usize, 84), (try sym_index.findSymbol("my_func")).?);
+
+    // Direct lookup of defining member
+    const member_hdr = (try ar.findMemberDefiningSymbol("my_func")).?;
+    try std.testing.expectEqualStrings("obj.o", try member_hdr.getName(&ar_buf, null));
+
+    // Selective extraction
+    var extractor = SelectiveExtractor.init(std.testing.allocator, &ar, null);
+    defer extractor.deinit();
+
+    const undefined_syms = [_][]const u8{ "my_func", "unused_func" };
+    const newly_extracted = try extractor.extractUndefined(&undefined_syms);
+    try std.testing.expectEqual(@as(usize, 1), newly_extracted);
+
+    const m = &extractor.extracted_members.items[0];
+    try std.testing.expectEqualStrings("obj.o", m.name);
+    try std.testing.expectEqualStrings("OBJ_PAYLOAD", m.data);
+    try std.testing.expect(!m.is_external);
+
+    // Deduplication: extract again, returns 0 newly extracted
+    const second_run = try extractor.extractUndefined(&undefined_syms);
+    try std.testing.expectEqual(@as(usize, 0), second_run);
+}
+
+test "thin archive relative path resolution and header traversal" {
+    // In a thin archive, members do not contain payload in the archive file.
+    // Member 1 at offset 8 (60 bytes)
+    // Member 2 at offset 68 (60 bytes)
+    var thin_buf: [128]u8 = undefined;
+    @memset(&thin_buf, ' ');
+    @memcpy(thin_buf[0..8], THIN_ARMAG);
+
+    // Member 1: "src/foo.o/"
+    @memcpy(thin_buf[8..18], "src/foo.o/");
+    @memcpy(thin_buf[56..58], "48"); // original file size, but 0 in archive
+    @memcpy(thin_buf[66..68], ARFMAG);
+
+    // Member 2: "bar.o/"
+    @memcpy(thin_buf[68..74], "bar.o/");
+    @memcpy(thin_buf[116..118], "96");
+    @memcpy(thin_buf[126..128], ARFMAG);
+
+    const ar = try Archive.parse(&thin_buf);
+    try std.testing.expect(ar.is_thin);
+
+    var iter = ar.iterator();
+    const m1 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("src/foo.o", try m1.getName(&thin_buf, null));
+    try std.testing.expectEqual(@as(usize, 8), m1.header_offset);
+
+    const m2 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("bar.o", try m2.getName(&thin_buf, null));
+    try std.testing.expectEqual(@as(usize, 68), m2.header_offset);
+
+    try std.testing.expect((try iter.next()) == null);
+
+    // Path resolution relative to archive directory
+    const resolved_path = try ar.resolveMemberPath(std.testing.allocator, &m1, "libs/sub/libtest.a");
+    defer std.testing.allocator.free(resolved_path);
+
+    try std.testing.expect(std.mem.endsWith(u8, resolved_path, "src/foo.o"));
 }

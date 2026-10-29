@@ -357,6 +357,15 @@ pub fn main(init: std.process.Init) !void {
                 if (sym_index.symbol_count > print_limit) {
                     std.debug.print("          ... and {d} more archive symbols\n", .{sym_index.symbol_count - print_limit});
                 }
+
+                // Phase 5.3: Test selective member lookup for the entry symbol
+                if (ar.findMemberDefiningSymbol(final_entry) catch null) |defining_member| {
+                    const def_name = defining_member.getName(mapped.data, ar.gnu_strtab) catch "<unnamed>";
+                    std.debug.print("      -> Selective match: symbol '{s}' provided by member: {s}\n", .{
+                        final_entry,
+                        def_name,
+                    });
+                }
             }
 
             var iter = ar.iterator();
