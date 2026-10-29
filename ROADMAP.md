@@ -31,10 +31,10 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 - [x] **4.5 Relocation Info:** Parse standard and scattered relocation entries for macOS targets.
 
 ## Phase 5: Static Archive Parsing (.a and .lib)
-- [ ] **5.1 Archive Header Validation:** Check the `!<arch>\n` magic bytes and read member headers.
-- [ ] **5.2 Symbol Index Parsing:** Parse symbol tables (like GNU `/` or BSD `__.SYMDEF`) to map symbols to member files.
-- [ ] **5.3 Member Extraction:** Extract only the object files that define symbols currently marked as undefined.
-- [ ] **5.4 Thin Archives:** Support thin archives by reading file paths and loading external objects directly.
+- [x] **5.1 Archive Header Validation:** Check the `!<arch>\n` magic bytes and read member headers.
+- [x] **5.2 Symbol Index Parsing:** Parse symbol tables (like GNU `/` or BSD `__.SYMDEF`) to map symbols to member files.
+- [x] **5.3 Member Extraction:** Extract only the object files that define symbols currently marked as undefined.
+- [x] **5.4 Thin Archives:** Support thin archives by reading file paths and loading external objects directly.
 
 ## Phase 6: Global Symbol Resolution
 - [ ] **6.1 Symbol Table Creation:** Build a central hash map to store all defined and undefined symbols.
