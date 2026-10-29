@@ -16,6 +16,7 @@ pub const Arch = enum {
     x86,
     arm,
 
+    /// Return the pointer width in bits for this architecture (32 or 64).
     pub fn pointerWidth(self: Arch) u8 {
         return switch (self) {
             .x86_64, .aarch64, .riscv64 => 64,
@@ -40,6 +41,8 @@ pub const TargetInfo = struct {
     default_entry: []const u8,
     default_output: []const u8,
 
+    /// Resolve a TargetInfo from the parsed options.
+    /// Prefers explicit emulation, then explicit format, then the host.
     pub fn detect(opts: args.Options) TargetInfo {
         if (opts.emulation != .unspecified) {
             return fromEmulation(opts.emulation);

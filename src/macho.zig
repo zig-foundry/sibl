@@ -10,16 +10,21 @@ const std = @import("std");
 
 /// 32-bit Mach-O magic numbers.
 pub const MH_MAGIC: u32 = 0xFEEDFACE;
+/// Swapped 32-bit Mach-O magic (big-endian).
 pub const MH_CIGAM: u32 = 0xCEFAEDFE;
 
 /// 64-bit Mach-O magic numbers.
 pub const MH_MAGIC_64: u32 = 0xFEEDFACF;
+/// Swapped 64-bit Mach-O magic (big-endian).
 pub const MH_CIGAM_64: u32 = 0xCFFACEED;
 
 /// Universal / FAT binary magic numbers.
 pub const FAT_MAGIC: u32 = 0xCAFEBABE;
+/// Swapped FAT/universal binary magic.
 pub const FAT_CIGAM: u32 = 0xBEBAFECA;
+/// 64-bit FAT/universal binary magic.
 pub const FAT_MAGIC_64: u32 = 0xCAFEBABF;
+/// Swapped 64-bit FAT/universal binary magic.
 pub const FAT_CIGAM_64: u32 = 0xBFBAFECA;
 
 /// Mach-O CPU architecture types.
@@ -32,6 +37,7 @@ pub const CpuType = enum(u32) {
     arm64_32 = 0x0200000C,
     _,
 
+    /// Return a human-readable name for this CpuType.
     pub fn name(self: CpuType) []const u8 {
         return switch (self) {
             .any => "any",
@@ -60,6 +66,7 @@ pub const FileType = enum(u32) {
     kext_bundle = 0xB,
     _,
 
+    /// Return a human-readable name for this FileType.
     pub fn name(self: FileType) []const u8 {
         return switch (self) {
             .object => "object",
@@ -80,30 +87,55 @@ pub const FileType = enum(u32) {
 
 /// Mach-O header flags bitmask (flags).
 pub const flags = struct {
+    /// No undefined references.
     pub const NOUNDEFS: u32 = 0x1;
+    /// Output of an incremental link.
     pub const INCRLINK: u32 = 0x2;
+    /// Input for the dynamic linker.
     pub const DYLDLINK: u32 = 0x4;
+    /// Undefined references bound at load time.
     pub const BINDATLOAD: u32 = 0x8;
+    /// Contains prebound undefined references.
     pub const PREBOUND: u32 = 0x10;
+    /// Read-only and read-write segments are split.
     pub const SPLIT_SEGS: u32 = 0x20;
+    /// Lazy initialization of the image.
     pub const LAZY_INIT: u32 = 0x40;
+    /// Uses two-level namespace bindings.
     pub const TWOLEVEL: u32 = 0x80;
+    /// Forces flat namespace bindings.
     pub const FORCE_FLAT: u32 = 0x100;
+    /// No multiple definitions of symbols.
     pub const NOMULTIDEFS: u32 = 0x200;
+    /// Do not fix prebinding.
     pub const NOFIXPREBINDING: u32 = 0x400;
+    /// Image is prebindable.
     pub const PREBINDABLE: u32 = 0x800;
+    /// All modules are bound.
     pub const ALLMODSBOUND: u32 = 0x1000;
+    /// Sections are divided via symbols.
     pub const SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
+    /// Canonicalized binary.
     pub const CANONICAL: u32 = 0x4000;
+    /// Contains weak definitions.
     pub const WEAK_DEFINES: u32 = 0x8000;
+    /// Binds to weak symbols.
     pub const BINDS_TO_WEAK: u32 = 0x10000;
+    /// Stack can be executed.
     pub const ALLOW_STACK_EXECUTION: u32 = 0x20000;
+    /// Binary is safe for root execution.
     pub const ROOT_SAFE: u32 = 0x40000;
+    /// Binary is safe for setuid execution.
     pub const SETUID_SAFE: u32 = 0x80000;
+    /// No re-exported dylibs.
     pub const NO_REEXPORTED_DYLIBS: u32 = 0x100000;
+    /// Position-independent executable.
     pub const PIE: u32 = 0x200000;
+    /// Dylib can be dead-stripped.
     pub const DEAD_STRIPPABLE_DYLIB: u32 = 0x400000;
+    /// Contains thread-local variable descriptors.
     pub const HAS_TLV_DESCRIPTORS: u32 = 0x800000;
+    /// Heap cannot be executed.
     pub const NO_HEAP_EXECUTION: u32 = 0x1000000;
 };
 
@@ -165,6 +197,7 @@ pub const CommandType = enum(u32) {
     fileset_entry = 0x35 | 0x80000000,
     _,
 
+    /// Return a human-readable name for this CommandType.
     pub fn name(self: CommandType) []const u8 {
         return switch (self) {
             .segment => "SEGMENT",
@@ -253,6 +286,7 @@ pub const SectionType = enum(u8) {
     init_func_offsets = 0x16,
     _,
 
+    /// Return a human-readable name for this SectionType.
     pub fn name(self: SectionType) []const u8 {
         return switch (self) {
             .regular => "regular",
@@ -285,27 +319,43 @@ pub const SectionType = enum(u8) {
 
 /// Section attribute bitmask flags (flags & SECTION_ATTRIBUTES_MASK).
 pub const section_attributes = struct {
+    /// Mask for the section type field.
     pub const SECTION_TYPE_MASK: u32 = 0x000000FF;
+    /// Mask for the section attributes field.
     pub const SECTION_ATTRIBUTES_MASK: u32 = 0xFFFFFF00;
 
+    /// Section contains only pure instructions.
     pub const PURE_INSTRUCTIONS: u32 = 0x80000000;
+    /// Section does not have a table of contents.
     pub const NO_TOC: u32 = 0x40000000;
+    /// Static symbols can be stripped.
     pub const STRIP_STATIC_SYMS: u32 = 0x20000000;
+    /// Section must not be dead-stripped.
     pub const NO_DEAD_STRIP: u32 = 0x10000000;
+    /// Section supports live symbols.
     pub const LIVE_SUPPORT: u32 = 0x08000000;
+    /// Section contains self-modifying code.
     pub const SELF_MODIFYING_CODE: u32 = 0x04000000;
+    /// Section contains debug information.
     pub const DEBUG_INFO: u32 = 0x02000000;
 
+    /// Section contains some instructions.
     pub const SOME_INSTRUCTIONS: u32 = 0x00000400;
+    /// Section has external relocations.
     pub const EXT_RELOC: u32 = 0x00000200;
+    /// Section has local relocations.
     pub const LOC_RELOC: u32 = 0x00000100;
 };
 
 /// Memory VM Protection Flags.
 pub const vm_prot = struct {
+    /// No protection.
     pub const NONE: u32 = 0x0;
+    /// Readable.
     pub const READ: u32 = 0x1;
+    /// Writable.
     pub const WRITE: u32 = 0x2;
+    /// Executable.
     pub const EXECUTE: u32 = 0x4;
 };
 
@@ -313,73 +363,104 @@ pub const vm_prot = struct {
 
 /// Bitmasks for n_type field in nlist_64.
 pub const nlist_masks = struct {
+    /// Debugger symbol mask.
     pub const STAB: u8 = 0xE0;
+    /// Private external symbol mask.
     pub const PEXT: u8 = 0x10;
+    /// Symbol type mask.
     pub const TYPE: u8 = 0x0E;
+    /// External symbol mask.
     pub const EXT: u8 = 0x01;
 };
 
 /// Symbol types for n_type field in nlist_64.
 pub const nlist_type = struct {
+    /// Undefined symbol.
     pub const UNDF: u8 = 0x0;
+    /// Absolute symbol.
     pub const ABS: u8 = 0x2;
+    /// Defined in a section.
     pub const SECT: u8 = 0xE;
+    /// Prebound undefined symbol.
     pub const PBUD: u8 = 0xC;
+    /// Indirect symbol.
     pub const INDR: u8 = 0xA;
 };
 
 /// Reference flags and attributes for n_desc field in nlist_64.
 pub const nlist_desc = struct {
+    /// Mask for the reference type field.
     pub const REFERENCE_TYPE_MASK: u16 = 0x0007;
+    /// Undefined non-lazy reference.
     pub const REFERENCE_FLAG_UNDEFINED_NON_LAZY: u16 = 0x0000;
+    /// Undefined lazy reference.
     pub const REFERENCE_FLAG_UNDEFINED_LAZY: u16 = 0x0001;
+    /// Defined reference.
     pub const REFERENCE_FLAG_DEFINED: u16 = 0x0002;
+    /// Private defined reference.
     pub const REFERENCE_FLAG_PRIVATE_DEFINED: u16 = 0x0003;
+    /// Private undefined lazy reference.
     pub const REFERENCE_FLAG_PRIVATE_UNDEFINED_LAZY: u16 = 0x0004;
+    /// Private undefined non-lazy reference.
     pub const REFERENCE_FLAG_PRIVATE_UNDEFINED_NON_LAZY: u16 = 0x0005;
 
+    /// ARM Thumb definition.
     pub const ARM_THUMB_DEF: u16 = 0x0008;
+    /// Symbol must not be dead-stripped.
     pub const NO_DEAD_STRIP: u16 = 0x0020;
+    /// Weak reference.
     pub const WEAK_REF: u16 = 0x0040;
+    /// Weak definition.
     pub const WEAK_DEF: u16 = 0x0080;
+    /// Reference to a weak symbol.
     pub const REF_TO_WEAK: u16 = 0x0080;
+    /// Symbol resolver.
     pub const SYMBOL_RESOLVER: u16 = 0x0100;
+    /// Alternate entry point.
     pub const ALT_ENTRY: u16 = 0x0200;
+    /// Cold function.
     pub const COLD_FUNC: u16 = 0x0400;
 };
 
 // === Relocation Constants ===
 
+/// Relocation-related bitfield constants.
 pub const reloc_constants = struct {
+    /// Scattered relocation flag.
     pub const R_SCATTERED: u32 = 0x80000000;
 };
 
 // === Error Sets ===
 
+/// Errors that can occur while parsing a Mach-O header.
 pub const Error = error{
     TruncatedHeader,
     InvalidMagic,
     UnsupportedFatBinary,
 };
 
+/// Errors that can occur while decoding load commands.
 pub const CommandError = error{
     TruncatedCommand,
     InvalidCommandSize,
     OutOfBounds,
 };
 
+/// Errors that can occur while parsing sections.
 pub const SectionError = error{
     TruncatedSectionTable,
     InvalidSectionIndex,
     InvalidSectionSize,
 };
 
+/// Errors that can occur while parsing symbols.
 pub const SymbolError = error{
     TruncatedSymbolTable,
     InvalidSymbolIndex,
     StringTableOutOfBounds,
 };
 
+/// Errors that can occur while parsing relocations.
 pub const RelocationError = error{
     TruncatedRelocationTable,
     InvalidRelocationIndex,
@@ -398,10 +479,12 @@ pub const Relocation = struct {
     is_scattered: bool,
     scattered_value: u32,
 
+    /// Return the size of this relocation entry in bytes.
     pub fn byteSize(self: Relocation) usize {
         return @as(usize, 1) << self.length;
     }
 
+    /// Return a human-readable name for the symbol type.
     pub fn typeName(self: Relocation, cpu: CpuType) []const u8 {
         return switch (cpu) {
             .arm64, .arm64_32 => switch (self.type_id) {
@@ -512,35 +595,42 @@ pub const Section64 = struct {
     reserved2: u32,
     reserved3: u32,
 
+    /// Return the section name as a null-terminated string.
     pub fn getSectName(self: *const Section64) []const u8 {
         const len = std.mem.indexOfScalar(u8, &self.raw_sectname, 0) orelse self.raw_sectname.len;
         return self.raw_sectname[0..len];
     }
 
+    /// Return the segment name as a null-terminated string.
     pub fn getSegName(self: *const Section64) []const u8 {
         const len = std.mem.indexOfScalar(u8, &self.raw_segname, 0) orelse self.raw_segname.len;
         return self.raw_segname[0..len];
     }
 
+    /// Return the section alignment in bytes.
     pub fn getAlignment(self: *const Section64) u32 {
         if (self.align_p2 >= 31) return 1 << 31;
         return @as(u32, 1) << @intCast(self.align_p2);
     }
 
+    /// Return the raw symbol type bits.
     pub fn getType(self: *const Section64) SectionType {
         const raw_type: u8 = @truncate(self.flags & section_attributes.SECTION_TYPE_MASK);
         return @fromBackingInt(@intCast(raw_type));
     }
 
+    /// Return true if the section is a zero-fill (BSS) section.
     pub fn isZeroFill(self: *const Section64) bool {
         const t = self.getType();
         return t == .zerofill or t == .gb_zerofill or t == .thread_local_zerofill;
     }
 
+    /// Return true if the section contains instructions.
     pub fn hasInstructions(self: *const Section64) bool {
         return (self.flags & (section_attributes.PURE_INSTRUCTIONS | section_attributes.SOME_INSTRUCTIONS)) != 0;
     }
 
+    /// Return the raw bytes of this section from the file.
     pub fn getData(self: *const Section64, file_bytes: []const u8) SectionError![]const u8 {
         if (self.isZeroFill() or self.size == 0) return &.{};
 
@@ -592,56 +682,72 @@ pub const Nlist64 = struct {
     desc: u16,
     value: u64,
 
+    /// No section (symbol is not defined in a section).
     pub const NO_SECT: u8 = 0;
 
+    /// Return true if this is a debugger (stab) symbol.
     pub fn isStab(self: *const Nlist64) bool {
         return (self.type_flags & nlist_masks.STAB) != 0;
     }
 
+    /// Return true if the symbol is external.
     pub fn isExternal(self: *const Nlist64) bool {
         return (self.type_flags & nlist_masks.EXT) != 0;
     }
 
+    /// Return true if the symbol is private external.
     pub fn isPrivateExternal(self: *const Nlist64) bool {
         return (self.type_flags & nlist_masks.PEXT) != 0;
     }
 
+    /// Return the raw symbol type bits.
     pub fn getType(self: *const Nlist64) u8 {
         return self.type_flags & nlist_masks.TYPE;
     }
 
+    /// Return true if the symbol is undefined.
     pub fn isUndefined(self: *const Nlist64) bool {
         return !self.isStab() and self.getType() == nlist_type.UNDF and self.value == 0;
     }
 
+    /// Return true if the symbol is a common symbol.
     pub fn isCommon(self: *const Nlist64) bool {
         return !self.isStab() and self.getType() == nlist_type.UNDF and self.value > 0;
     }
 
+    /// Return true if the symbol is absolute.
     pub fn isAbsolute(self: *const Nlist64) bool {
         return !self.isStab() and self.getType() == nlist_type.ABS;
     }
 
+    /// Return true if the symbol is defined in a section.
     pub fn isSection(self: *const Nlist64) bool {
         return !self.isStab() and self.getType() == nlist_type.SECT;
     }
 
+    /// Return true if the symbol is indirect.
     pub fn isIndirect(self: *const Nlist64) bool {
         return !self.isStab() and self.getType() == nlist_type.INDR;
     }
 
+    /// Return true if the symbol is a weak definition.
     pub fn isWeakDef(self: *const Nlist64) bool {
         return (self.desc & nlist_desc.WEAK_DEF) != 0;
     }
 
+    /// Return true if the symbol is a weak reference.
     pub fn isWeakRef(self: *const Nlist64) bool {
         return (self.desc & nlist_desc.WEAK_REF) != 0;
     }
 
+    /// Return the library ordinal for two-level namespace.
     pub fn getLibraryOrdinal(self: *const Nlist64) u8 {
         return @truncate((self.desc >> 8) & 0xFF);
     }
 
+    /// Resolve the symbol name from the string table.
+    /// Return the segment name as a null-terminated string.
+    /// Return the segment or symbol name as a null-terminated string.
     pub fn getName(self: *const Nlist64, strtab_bytes: []const u8) SymbolError![]const u8 {
         if (self.strx == 0) return "";
         if (self.strx >= strtab_bytes.len) return error.StringTableOutOfBounds;
@@ -651,6 +757,7 @@ pub const Nlist64 = struct {
         return slice[0..len];
     }
 
+    /// Return a human-readable name for the symbol type.
     pub fn typeName(self: *const Nlist64) []const u8 {
         if (self.isStab()) return "STAB";
         return switch (self.getType()) {
@@ -691,23 +798,29 @@ pub const Segment64Command = struct {
     flags: u32,
     sections_data: []const u8,
 
+    /// Return the segment name as a null-terminated string.
     pub fn getName(self: *const Segment64Command) []const u8 {
         const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
         return self.raw_name[0..len];
     }
 
+    /// Return true if the segment has execute permission.
+    /// Return true if this is an executable.
     pub fn isExecutable(self: *const Segment64Command) bool {
         return (self.initprot & vm_prot.EXECUTE) != 0;
     }
 
+    /// Return true if the segment has write permission.
     pub fn isWritable(self: *const Segment64Command) bool {
         return (self.initprot & vm_prot.WRITE) != 0;
     }
 
+    /// Return true if the segment has read permission.
     pub fn isReadable(self: *const Segment64Command) bool {
         return (self.initprot & vm_prot.READ) != 0;
     }
 
+    /// Parse a single section at the given index inside this segment.
     pub fn parseSection(self: *const Segment64Command, endian: std.builtin.Endian, index: usize) SectionError!Section64 {
         if (index >= self.nsects) return error.InvalidSectionIndex;
         const offset = index * 80;
@@ -715,6 +828,7 @@ pub const Segment64Command = struct {
         return parseSection64(self.sections_data[offset .. offset + 80], endian);
     }
 
+    /// Parse every section inside this segment.
     pub fn parseAllSections(
         self: *const Segment64Command,
         allocator: std.mem.Allocator,
@@ -764,6 +878,7 @@ pub const SymtabCommand = struct {
     stroff: u32,
     strsize: u32,
 
+    /// Return the raw bytes of the string table referenced by this command.
     pub fn getStringTable(self: *const SymtabCommand, file_bytes: []const u8) []const u8 {
         const start: usize = self.stroff;
         const end: usize = std.math.add(usize, start, self.strsize) catch return &.{};
@@ -771,6 +886,7 @@ pub const SymtabCommand = struct {
         return file_bytes[start..end];
     }
 
+    /// Parse a single nlist_64 entry at the given index.
     pub fn parseSymbol(self: *const SymtabCommand, file_bytes: []const u8, endian: std.builtin.Endian, index: usize) SymbolError!Nlist64 {
         if (index >= self.nsyms) return error.InvalidSymbolIndex;
         const offset: usize = self.symoff + (index * 16);
@@ -778,6 +894,7 @@ pub const SymtabCommand = struct {
         return parseNlist64(file_bytes[offset .. offset + 16], endian);
     }
 
+    /// Parse every symbol in the symbol table.
     pub fn parseAllSymbols(
         self: *const SymtabCommand,
         allocator: std.mem.Allocator,
@@ -831,6 +948,7 @@ pub const DylibCommand = struct {
     compatibility_version: u32,
     raw_data: []const u8,
 
+    /// Return the dylib name, or null if the offset is invalid.
     pub fn getName(self: *const DylibCommand) ?[:0]const u8 {
         if (self.name_offset >= self.raw_data.len) return null;
         const slice = self.raw_data[self.name_offset..];
@@ -846,6 +964,7 @@ pub const BuildVersionCommand = struct {
     sdk: u32,
     ntools: u32,
 
+    /// Return a human-readable name for the platform.
     pub fn platformName(self: *const BuildVersionCommand) []const u8 {
         return switch (self.platform) {
             1 => "macOS",
@@ -868,6 +987,7 @@ pub const LoadCommand = struct {
     cmdsize: u32,
     bytes: []const u8,
 
+    /// Interpret this load command as a 64-bit segment command.
     pub fn asSegment64(self: LoadCommand, endian: std.builtin.Endian) CommandError!Segment64Command {
         if (self.cmd != .segment_64) return error.TruncatedCommand;
         if (self.bytes.len < 72) return error.TruncatedCommand;
@@ -892,6 +1012,7 @@ pub const LoadCommand = struct {
         };
     }
 
+    /// Interpret this load command as a symbol table command.
     pub fn asSymtab(self: LoadCommand, endian: std.builtin.Endian) CommandError!SymtabCommand {
         if (self.cmd != .symtab) return error.TruncatedCommand;
         if (self.bytes.len < 24) return error.TruncatedCommand;
@@ -904,6 +1025,7 @@ pub const LoadCommand = struct {
         };
     }
 
+    /// Interpret this load command as a dynamic symbol table command.
     pub fn asDysymtab(self: LoadCommand, endian: std.builtin.Endian) CommandError!DysymtabCommand {
         if (self.cmd != .dysymtab) return error.TruncatedCommand;
         if (self.bytes.len < 80) return error.TruncatedCommand;
@@ -930,6 +1052,7 @@ pub const LoadCommand = struct {
         };
     }
 
+    /// Interpret this load command as an entry-point command.
     pub fn asMain(self: LoadCommand, endian: std.builtin.Endian) CommandError!MainCommand {
         if (self.cmd != .main) return error.TruncatedCommand;
         if (self.bytes.len < 24) return error.TruncatedCommand;
@@ -940,6 +1063,7 @@ pub const LoadCommand = struct {
         };
     }
 
+    /// Interpret this load command as a dylib command.
     pub fn asDylib(self: LoadCommand, endian: std.builtin.Endian) CommandError!DylibCommand {
         if (self.bytes.len < 24) return error.TruncatedCommand;
 
@@ -952,6 +1076,7 @@ pub const LoadCommand = struct {
         };
     }
 
+    /// Interpret this load command as a build-version command.
     pub fn asBuildVersion(self: LoadCommand, endian: std.builtin.Endian) CommandError!BuildVersionCommand {
         if (self.cmd != .build_version) return error.TruncatedCommand;
         if (self.bytes.len < 24) return error.TruncatedCommand;
@@ -973,6 +1098,7 @@ pub const LoadCommandIterator = struct {
     commands_left: u32,
     endian: std.builtin.Endian,
 
+    /// Advance to the next load command, or return null at end.
     pub fn next(self: *LoadCommandIterator) CommandError!?LoadCommand {
         if (self.commands_left == 0) return null;
         if (self.cursor + 8 > self.end_offset) return error.TruncatedCommand;
@@ -1010,22 +1136,27 @@ pub const Header = struct {
     flags: u32,
     reserved: u32,
 
+    /// Return true if this is a relocatable object file.
     pub fn isObject(self: *const Header) bool {
         return self.file_type == .object;
     }
 
+    /// Return true if this is an executable.
     pub fn isExecutable(self: *const Header) bool {
         return self.file_type == .execute;
     }
 
+    /// Return true if this is a dynamic library.
     pub fn isDylib(self: *const Header) bool {
         return self.file_type == .dylib;
     }
 
+    /// Return true if this is a position-independent executable.
     pub fn isPie(self: *const Header) bool {
         return (self.flags & flags.PIE) != 0;
     }
 
+    /// Return the size of the Mach-O header in bytes.
     pub fn headerSize(self: *const Header) usize {
         return if (self.is_64bit) 32 else 28;
     }
@@ -1092,6 +1223,7 @@ pub const Header = struct {
         };
     }
 
+    /// Return an iterator over the load commands in this file.
     pub fn loadCommands(self: *const Header, file_bytes: []const u8) CommandError!LoadCommandIterator {
         const start = self.headerSize();
         const end = std.math.add(usize, start, self.sizeofcmds) catch return error.OutOfBounds;

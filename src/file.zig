@@ -11,6 +11,7 @@ pub const MappedFile = struct {
     size: usize,
     map: ?std.Io.File.MemoryMap,
 
+    /// Errors that can occur while opening or mapping a file.
     pub const OpenError = error{
         FileTooBig,
         FileNotFound,
@@ -20,6 +21,8 @@ pub const MappedFile = struct {
         Unexpected,
     };
 
+    /// Open and memory-map a file for zero-copy read access.
+    /// Empty files are handled specially and return an empty slice with no mapping.
     pub fn open(io: std.Io, file_path: []const u8) !MappedFile {
         var file = if (std.fs.path.isAbsolute(file_path))
             try std.Io.Dir.openFileAbsolute(io, file_path, .{ .mode = .read_only })
@@ -50,6 +53,8 @@ pub const MappedFile = struct {
         };
     }
 
+    /// Unmap the file and clear the data slice.
+    /// Safe to call even if the mapping was never created.
     pub fn deinit(self: *MappedFile, io: std.Io) void {
         if (self.map) |*m| {
             m.destroy(io);

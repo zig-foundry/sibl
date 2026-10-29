@@ -13,6 +13,7 @@ pub const StringTableReader = struct {
     /// Raw slice of the string table section
     data: []const u8,
 
+    /// Errors that can occur while reading from a string table.
     pub const ReadError = error{
         OutOfBounds,
         MissingNullTerminator,
@@ -50,10 +51,12 @@ pub const StringTableReader = struct {
 
     // --- Reader Iterator ---
 
+    /// Iterator that walks every null-terminated string in the table.
     pub const Iterator = struct {
         data: []const u8,
         offset: usize,
 
+        /// A single string entry yielded by the iterator.
         pub const Entry = struct {
             offset: u32,
             string: [:0]const u8,

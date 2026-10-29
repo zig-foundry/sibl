@@ -16,6 +16,7 @@ pub const Class = enum(u8) {
     elf32 = 1,
     elf64 = 2,
 
+    /// Return a human-readable name for this Class.
     pub fn name(self: Class) []const u8 {
         return switch (self) {
             .none => "none",
@@ -41,6 +42,7 @@ pub const FileType = enum(u16) {
     core = 4, // Core dump
     _,
 
+    /// Return a human-readable name for this FileType.
     pub fn name(self: FileType) []const u8 {
         return switch (self) {
             .none => "none",
@@ -63,6 +65,7 @@ pub const Machine = enum(u16) {
     riscv = 243,
     _,
 
+    /// Return a human-readable name for this Machine.
     pub fn name(self: Machine) []const u8 {
         return switch (self) {
             .none => "none",
@@ -129,6 +132,7 @@ pub const SectionType = enum(u32) {
 
     _,
 
+    /// Return a human-readable name for this SectionType.
     pub fn name(self: SectionType) []const u8 {
         return switch (self) {
             .null => "null",
@@ -166,15 +170,25 @@ pub const SectionType = enum(u32) {
 
 /// Section attribute flags (sh_flags bitmask).
 pub const flags = struct {
+    /// Section is writable.
     pub const WRITE: u64 = 1 << 0;
+    /// Section occupies memory during execution.
     pub const ALLOC: u64 = 1 << 1;
+    /// Section contains executable instructions.
     pub const EXECINSTR: u64 = 1 << 2;
+    /// Section may be merged with others of the same type.
     pub const MERGE: u64 = 1 << 4;
+    /// Section contains null-terminated strings.
     pub const STRINGS: u64 = 1 << 5;
+    /// sh_info field contains a section header index.
     pub const INFO_LINK: u64 = 1 << 6;
+    /// Section must be ordered relative to another section.
     pub const LINK_ORDER: u64 = 1 << 7;
+    /// Section requires special OS-specific handling.
     pub const OS_NONCONFORMING: u64 = 1 << 8;
+    /// Section is a member of a section group.
     pub const GROUP: u64 = 1 << 9;
+    /// Section holds thread-local storage.
     pub const TLS: u64 = 1 << 10;
 };
 
@@ -187,6 +201,7 @@ pub const SymbolBinding = enum(u4) {
     weak = 2,
     _,
 
+    /// Return a human-readable name for this SymbolBinding.
     pub fn name(self: SymbolBinding) []const u8 {
         return switch (self) {
             .local => "LOCAL",
@@ -209,6 +224,7 @@ pub const SymbolType = enum(u4) {
     gnu_ifunc = 10,
     _,
 
+    /// Return a human-readable name for this SymbolType.
     pub fn name(self: SymbolType) []const u8 {
         return switch (self) {
             .notype => "NOTYPE",
@@ -231,6 +247,7 @@ pub const SymbolVisibility = enum(u2) {
     hidden = 2,
     protected = 3,
 
+    /// Return a human-readable name for this SymbolVisibility.
     pub fn name(self: SymbolVisibility) []const u8 {
         return switch (self) {
             .default => "DEFAULT",
@@ -243,10 +260,15 @@ pub const SymbolVisibility = enum(u2) {
 
 /// Special section indices reserved for symbol definitions (SHN_*).
 pub const SpecialSectionIndex = struct {
+    /// Undefined section (SHN_UNDEF).
     pub const UNDEF: u16 = 0;
+    /// Start of reserved section index range.
     pub const LORESERVE: u16 = 0xff00;
+    /// Absolute symbol (SHN_ABS).
     pub const ABS: u16 = 0xfff1;
+    /// Common symbol (SHN_COMMON).
     pub const COMMON: u16 = 0xfff2;
+    /// Extended section index (SHN_XINDEX).
     pub const XINDEX: u16 = 0xffff;
 };
 
@@ -352,6 +374,7 @@ pub const Relocation = struct {
 
 // === Error Sets ===
 
+/// Errors that can occur while parsing an ELF header.
 pub const HeaderError = error{
     TruncatedHeader,
     InvalidMagic,
@@ -360,6 +383,7 @@ pub const HeaderError = error{
     InvalidVersion,
 };
 
+/// Errors that can occur while parsing section headers or section data.
 pub const SectionError = error{
     TruncatedSectionTable,
     InvalidSectionIndex,
@@ -367,6 +391,7 @@ pub const SectionError = error{
     StringTableOutOfBounds,
 };
 
+/// Errors that can occur while parsing symbol table entries.
 pub const SymbolError = error{
     TruncatedSymbolTable,
     InvalidSymbolIndex,
@@ -374,6 +399,7 @@ pub const SymbolError = error{
     StringTableOutOfBounds,
 };
 
+/// Errors that can occur while parsing relocation entries.
 pub const RelocationError = error{
     TruncatedRelocationTable,
     InvalidRelocationIndex,
@@ -396,18 +422,22 @@ pub const SectionHeader = struct {
     addralign: u64,
     entsize: u64,
 
+    /// Return true if the section has the ALLOC flag set.
     pub fn isAlloc(self: SectionHeader) bool {
         return (self.sh_flags & flags.ALLOC) != 0;
     }
 
+    /// Return true if the section has the WRITE flag set.
     pub fn isWritable(self: SectionHeader) bool {
         return (self.sh_flags & flags.WRITE) != 0;
     }
 
+    /// Return true if the section has the EXECINSTR flag set.
     pub fn isExecutable(self: SectionHeader) bool {
         return (self.sh_flags & flags.EXECINSTR) != 0;
     }
 
+    /// Return the raw bytes of this section from the file.
     pub fn getData(self: SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
         if (self.sh_type == .nobits or self.size == 0) {
             return &.{};
@@ -426,6 +456,7 @@ pub const SectionHeader = struct {
         return file_bytes[start..end];
     }
 
+    /// Resolve the section name from the section header string table.
     pub fn getName(self: SectionHeader, shstrtab_data: []const u8) SectionError![:0]const u8 {
         if (self.name_offset >= shstrtab_data.len) {
             return error.StringTableOutOfBounds;
@@ -436,6 +467,7 @@ pub const SectionHeader = struct {
         return slice[0..len :0];
     }
 
+    /// Return the number of symbols in this section (for SHT_SYMTAB / SHT_DYNSYM).
     pub fn getSymbolCount(self: SectionHeader, class: Class) SymbolError!usize {
         const expected_entry_size: u64 = switch (class) {
             .elf64 => 24,
@@ -451,6 +483,7 @@ pub const SectionHeader = struct {
         return @intCast(self.size / entry_size);
     }
 
+    /// Parse a single symbol at the given index from this section.
     pub fn parseSymbol(
         self: SectionHeader,
         file_bytes: []const u8,
@@ -482,6 +515,7 @@ pub const SectionHeader = struct {
         };
     }
 
+    /// Parse every symbol in this section into a newly allocated slice.
     pub fn parseAllSymbols(
         self: SectionHeader,
         allocator: std.mem.Allocator,
@@ -641,6 +675,7 @@ pub const Header = struct {
         };
     }
 
+    /// Parse the section header at the given index.
     pub fn parseSectionHeader(self: Header, bytes: []const u8, index: usize) SectionError!SectionHeader {
         if (index >= self.shnum) {
             return error.InvalidSectionIndex;
@@ -670,6 +705,7 @@ pub const Header = struct {
         };
     }
 
+    /// Parse every section header in the file into a newly allocated slice.
     pub fn parseAllSectionHeaders(
         self: Header,
         allocator: std.mem.Allocator,
@@ -686,6 +722,7 @@ pub const Header = struct {
         return sections;
     }
 
+    /// Return the raw bytes of the section header string table (.shstrtab).
     pub fn getSectionStringTable(self: Header, bytes: []const u8) SectionError![]const u8 {
         if (self.shstrndx >= self.shnum) {
             return error.InvalidSectionIndex;

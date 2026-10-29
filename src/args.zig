@@ -13,6 +13,8 @@ pub const TargetFormat = enum {
     coff,
     macho,
 
+    /// Parse a format name ("elf", "coff", "pe", "macho", "auto") into a TargetFormat.
+    /// Returns null if the string is not recognized.
     pub fn fromString(str: []const u8) ?TargetFormat {
         if (std.mem.eql(u8, str, "elf")) return .elf;
         if (std.mem.eql(u8, str, "coff") or std.mem.eql(u8, str, "pe")) return .coff;
@@ -31,6 +33,8 @@ pub const Emulation = enum {
     pe_x86_64,
     pe_aarch64,
 
+    /// Parse an emulation string (e.g. "elf_x86_64", "aarch64elf", "i386pep") into an Emulation.
+    /// Returns null if the string is not recognized.
     pub fn fromString(str: []const u8) ?Emulation {
         if (std.mem.eql(u8, str, "elf_x86_64")) return .elf_x86_64;
         if (std.mem.eql(u8, str, "aarch64elf") or std.mem.eql(u8, str, "elf_aarch64")) return .elf_aarch64;
@@ -66,6 +70,7 @@ pub const Options = struct {
     /// List of library names to link (-l<name>)
     libs: std.ArrayListUnmanaged([]const u8) = .empty,
 
+    /// Free the ArrayLists that own the input file, library, and search-path lists.
     pub fn deinit(self: *Options, allocator: std.mem.Allocator) void {
         self.input_files.deinit(allocator);
         self.lib_dirs.deinit(allocator);
@@ -73,6 +78,7 @@ pub const Options = struct {
     }
 };
 
+/// Errors that can be returned while parsing command-line arguments.
 pub const ParseError = error{
     MissingValue,
     UnknownOption,
@@ -200,6 +206,7 @@ pub fn parse(allocator: std.mem.Allocator, raw_args: []const []const u8) ParseEr
     return opts;
 }
 
+/// Print the sibl usage help text to stderr and exit.
 pub fn printHelp() void {
     const help_msg =
         \\sibl - Something is Better Linker

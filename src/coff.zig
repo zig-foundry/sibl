@@ -16,8 +16,11 @@ pub const PE_SIGNATURE = [4]u8{ 'P', 'E', 0, 0 };
 
 /// Optional Header Magic numbers.
 pub const OptionalHeaderMagic = struct {
+    /// Optional header magic for PE32 (32-bit).
     pub const PE32: u16 = 0x010B; // 32-bit executable
+    /// Optional header magic for PE32+ (64-bit).
     pub const PE32_PLUS: u16 = 0x020B; // 64-bit executable (PE32+)
+    /// Optional header magic for ROM images.
     pub const ROM: u16 = 0x0107;
 };
 
@@ -31,6 +34,7 @@ pub const Machine = enum(u16) {
     riscv64 = 0x5064, // RISC-V 64-bit
     _,
 
+    /// Return a human-readable name for this machine type.
     pub fn name(self: Machine) []const u8 {
         return switch (self) {
             .unknown => "unknown",
@@ -43,6 +47,7 @@ pub const Machine = enum(u16) {
         };
     }
 
+    /// Return true if the raw machine value is a recognized architecture.
     pub fn isKnown(raw: u16) bool {
         return switch (raw) {
             0x014C, 0x01C0, 0x8664, 0xAA64, 0x5064 => true,
@@ -53,41 +58,73 @@ pub const Machine = enum(u16) {
 
 /// COFF file characteristics bitmask (IMAGE_FILE_*).
 pub const characteristics = struct {
+    /// Relocations have been stripped from the file.
     pub const RELOCS_STRIPPED: u16 = 0x0001;
+    /// File is an executable image (not a relocatable object).
     pub const EXECUTABLE_IMAGE: u16 = 0x0002;
+    /// Line numbers have been stripped.
     pub const LINE_NUMS_STRIPPED: u16 = 0x0004;
+    /// Local symbols have been stripped.
     pub const LOCAL_SYMS_STRIPPED: u16 = 0x0008;
+    /// Application can handle addresses larger than 2 GB.
     pub const LARGE_ADDRESS_AWARE: u16 = 0x0020;
+    /// Machine is based on a 32-bit architecture.
     pub const BIT32_MACHINE: u16 = 0x0100;
+    /// Debugging information has been stripped.
     pub const DEBUG_STRIPPED: u16 = 0x0200;
+    /// If the image is on removable media, copy and run from the swap file.
     pub const REMOVABLE_RUN_FROM_SWAP: u16 = 0x0400;
+    /// If the image is on network media, copy and run from the swap file.
     pub const NET_RUN_FROM_SWAP: u16 = 0x0800;
+    /// The image is a system file.
     pub const SYSTEM: u16 = 0x1000;
+    /// The image is a dynamic-link library.
     pub const DLL: u16 = 0x2000;
+    /// The file should only be run on a uniprocessor machine.
     pub const UP_SYSTEM_ONLY: u16 = 0x4000;
 };
 
 /// Section characteristics bitmask (IMAGE_SCN_*).
 pub const section_flags = struct {
+    /// Section should not be padded to the next boundary.
     pub const TYPE_NO_PAD: u32 = 0x00000008;
+    /// Section contains executable code.
     pub const CNT_CODE: u32 = 0x00000020;
+    /// Section contains initialized data.
     pub const CNT_INITIALIZED_DATA: u32 = 0x00000040;
+    /// Section contains uninitialized data (BSS).
     pub const CNT_UNINITIALIZED_DATA: u32 = 0x00000080;
+    /// Section contains comments or other information.
     pub const LNK_INFO: u32 = 0x00000200;
+    /// Section will not become part of the image.
     pub const LNK_REMOVE: u32 = 0x00000800;
+    /// Section contains COMDAT data.
     pub const LNK_COMDAT: u32 = 0x00001000;
+    /// Section contains data referenced through the global pointer.
     pub const GPREL: u32 = 0x00008000;
+    /// Section can be discarded.
     pub const MEM_PURGEABLE: u32 = 0x00020000;
+    /// Section is 16-bit (alias of MEM_PURGEABLE).
     pub const MEM_16BIT: u32 = 0x00020000;
+    /// Section is locked in memory.
     pub const MEM_LOCKED: u32 = 0x00040000;
+    /// Section is not pageable.
     pub const MEM_PRELOAD: u32 = 0x00080000;
+    /// Section contains extended relocations.
     pub const LNK_NRELOC_OVFL: u32 = 0x01000000;
+    /// Section can be discarded as needed.
     pub const MEM_DISCARDABLE: u32 = 0x02000000;
+    /// Section cannot be cached.
     pub const MEM_NOT_CACHED: u32 = 0x04000000;
+    /// Section is not pageable.
     pub const MEM_NOT_PAGED: u32 = 0x08000000;
+    /// Section can be shared in memory.
     pub const MEM_SHARED: u32 = 0x10000000;
+    /// Section can be executed as code.
     pub const MEM_EXECUTE: u32 = 0x20000000;
+    /// Section can be read.
     pub const MEM_READ: u32 = 0x40000000;
+    /// Section can be written to.
     pub const MEM_WRITE: u32 = 0x80000000;
 };
 
@@ -101,6 +138,7 @@ pub const ComdatSelection = enum(u8) {
     largest = 6, // Pick the definition with the largest byte size
     _,
 
+    /// Return a human-readable name for this COMDAT selection.
     pub fn name(self: ComdatSelection) []const u8 {
         return switch (self) {
             .no_duplicates => "NODUPLICATES",
@@ -125,6 +163,7 @@ pub const SectionKind = enum {
     discard, // Temporary directives or discarded sections (.drectve)
     metadata, // Non-allocatable linker comments or info (.comment)
 
+    /// Return a human-readable name for this section kind.
     pub fn name(self: SectionKind) []const u8 {
         return switch (self) {
             .text => "text",
@@ -145,6 +184,7 @@ pub const SectionPermissions = struct {
     write: bool,
     execute: bool,
 
+    /// Return a 3-character permission string (e.g. "RWX").
     pub fn toChars(self: SectionPermissions) [3]u8 {
         return .{
             if (self.read) 'R' else '-',
@@ -185,6 +225,7 @@ pub const StorageClass = enum(u8) {
     end_of_function = 0xFF,
     _,
 
+    /// Return a human-readable name for this storage class.
     pub fn name(self: StorageClass) []const u8 {
         return switch (self) {
             .null => "NULL",
@@ -221,8 +262,11 @@ pub const StorageClass = enum(u8) {
 
 /// Special section numbers in COFF symbol table.
 pub const SpecialSection = struct {
+    /// Undefined section index.
     pub const UNDEFINED: i16 = 0;
+    /// Absolute section index.
     pub const ABSOLUTE: i16 = -1;
+    /// Debug section index.
     pub const DEBUG: i16 = -2;
 };
 
@@ -242,6 +286,7 @@ pub const Subsystem = enum(u16) {
     windows_boot_application = 16,
     _,
 
+    /// Return a human-readable name for this subsystem.
     pub fn name(self: Subsystem) []const u8 {
         return switch (self) {
             .unknown => "unknown",
@@ -308,6 +353,7 @@ pub const Relocation = struct {
     symbol_table_index: u32,
     type_id: u16,
 
+    /// Return a human-readable name for this relocation type on the given machine.
     pub fn typeName(self: Relocation, machine: Machine) []const u8 {
         return switch (machine) {
             .x86_64 => switch (self.type_id) {
@@ -366,6 +412,7 @@ pub const Relocation = struct {
 
 // === Error Sets ===
 
+/// Errors that can occur while parsing a COFF or PE header.
 pub const Error = error{
     TruncatedHeader,
     NotCoffOrPe,
@@ -375,6 +422,7 @@ pub const Error = error{
     TruncatedOptionalHeader,
 };
 
+/// Errors that can occur while parsing section headers or section data.
 pub const SectionError = error{
     TruncatedSectionTable,
     InvalidSectionIndex,
@@ -383,12 +431,14 @@ pub const SectionError = error{
     InvalidStringOffset,
 };
 
+/// Errors that can occur while parsing COFF symbols.
 pub const SymbolError = error{
     TruncatedSymbolTable,
     InvalidSymbolIndex,
     StringTableOutOfBounds,
 };
 
+/// Errors that can occur while parsing COFF relocations.
 pub const RelocationError = error{
     TruncatedRelocationTable,
     InvalidRelocationIndex,
@@ -409,42 +459,53 @@ pub const SectionHeader = struct {
     number_of_linenumbers: u16,
     characteristics: u32,
 
+    /// Return true if the section has execute permission.
+    /// Return true if this is an executable image.
     pub fn isExecutable(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_EXECUTE) != 0;
     }
 
+    /// Return true if the section has read permission.
     pub fn isReadable(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_READ) != 0;
     }
 
+    /// Return true if the section has write permission.
     pub fn isWritable(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.MEM_WRITE) != 0;
     }
 
+    /// Return true if the section contains code.
     pub fn hasCode(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_CODE) != 0;
     }
 
+    /// Return true if the section contains initialized data.
     pub fn hasInitializedData(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_INITIALIZED_DATA) != 0;
     }
 
+    /// Return true if the section contains uninitialized data.
     pub fn hasUninitializedData(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.CNT_UNINITIALIZED_DATA) != 0;
     }
 
+    /// Return true if the section is a COMDAT section.
     pub fn isComdat(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.LNK_COMDAT) != 0;
     }
 
+    /// Return true if the section can be discarded.
     pub fn isDiscardable(self: *const SectionHeader) bool {
         return (self.characteristics & (section_flags.MEM_DISCARDABLE | section_flags.LNK_REMOVE)) != 0;
     }
 
+    /// Return true if the section uses the extended relocation overflow table.
     pub fn hasRelocationOverflow(self: *const SectionHeader) bool {
         return (self.characteristics & section_flags.LNK_NRELOC_OVFL) != 0 and self.number_of_relocations == 0xFFFF;
     }
 
+    /// Return the section alignment in bytes.
     pub fn getAlignment(self: *const SectionHeader) u32 {
         const align_val = (self.characteristics >> 20) & 0x0F;
         if (align_val == 0) return 16;
@@ -452,6 +513,7 @@ pub const SectionHeader = struct {
         return @as(u32, 1) << @intCast(align_val - 1);
     }
 
+    /// Return the mapped permissions for this section.
     pub fn getPermissions(self: *const SectionHeader) SectionPermissions {
         return .{
             .read = self.isReadable(),
@@ -505,6 +567,7 @@ pub const SectionHeader = struct {
     }
 
     /// Extract section name string, resolving long names from the COFF string table.
+    /// Resolve the symbol name from the string table.
     pub fn getName(self: *const SectionHeader, strtab_bytes: []const u8) SectionError![]const u8 {
         if (self.raw_name[0] == '/') {
             const len = std.mem.indexOfScalar(u8, &self.raw_name, 0) orelse self.raw_name.len;
@@ -545,6 +608,7 @@ pub const SectionHeader = struct {
         return null;
     }
 
+    /// Return the raw bytes of this section from the file.
     pub fn getData(self: *const SectionHeader, file_bytes: []const u8) SectionError![]const u8 {
         if (self.size_of_raw_data == 0) return &.{};
 
@@ -560,6 +624,7 @@ pub const SectionHeader = struct {
         return file_bytes[start..end];
     }
 
+    /// Return the number of relocations in this section.
     pub fn getRelocationCount(self: *const SectionHeader, file_bytes: []const u8) RelocationError!u32 {
         if (self.number_of_relocations == 0 and !self.hasRelocationOverflow()) return 0;
 
@@ -574,6 +639,7 @@ pub const SectionHeader = struct {
         return self.number_of_relocations;
     }
 
+    /// Parse a single relocation at the given index.
     pub fn parseRelocation(self: *const SectionHeader, file_bytes: []const u8, index: usize) RelocationError!Relocation {
         const count = try self.getRelocationCount(file_bytes);
         if (index >= count) {
@@ -597,6 +663,7 @@ pub const SectionHeader = struct {
         };
     }
 
+    /// Parse every relocation in this section.
     pub fn parseAllRelocations(
         self: *const SectionHeader,
         allocator: std.mem.Allocator,
@@ -626,30 +693,37 @@ pub const Symbol = struct {
     storage_class: StorageClass,
     num_aux_symbols: u8,
 
+    /// Return true if the symbol is undefined.
     pub fn isUndefined(self: *const Symbol) bool {
         return self.section_number == SpecialSection.UNDEFINED and self.value == 0;
     }
 
+    /// Return true if the symbol is a common symbol.
     pub fn isCommon(self: *const Symbol) bool {
         return self.section_number == SpecialSection.UNDEFINED and self.value > 0;
     }
 
+    /// Return true if the symbol is absolute.
     pub fn isAbsolute(self: *const Symbol) bool {
         return self.section_number == SpecialSection.ABSOLUTE;
     }
 
+    /// Return true if the symbol has external storage class.
     pub fn isExternal(self: *const Symbol) bool {
         return self.storage_class == .external;
     }
 
+    /// Return true if the symbol has static storage class.
     pub fn isStatic(self: *const Symbol) bool {
         return self.storage_class == .static;
     }
 
+    /// Return true if the symbol represents a function.
     pub fn isFunction(self: *const Symbol) bool {
         return (self.sym_type & 0x20) != 0 or self.storage_class == .function;
     }
 
+    /// Resolve the symbol name from the string table.
     pub fn getName(self: *const Symbol, strtab_bytes: []const u8) SymbolError![]const u8 {
         const zeroes = std.mem.readInt(u32, self.raw_name[0..4], .little);
         if (zeroes == 0) {
@@ -683,14 +757,17 @@ pub const Header = struct {
     section_headers_offset: u32,
     optional_header: ?OptionalHeader,
 
+    /// Return true if this is an executable image.
     pub fn isExecutable(self: Header) bool {
         return (self.characteristics_flags & characteristics.EXECUTABLE_IMAGE) != 0;
     }
 
+    /// Return true if this is a DLL.
     pub fn isDll(self: Header) bool {
         return (self.characteristics_flags & characteristics.DLL) != 0;
     }
 
+    /// Return true if relocations have been stripped.
     pub fn hasRelocsStripped(self: Header) bool {
         return (self.characteristics_flags & characteristics.RELOCS_STRIPPED) != 0;
     }
@@ -712,6 +789,7 @@ pub const Header = struct {
         return error.NotCoffOrPe;
     }
 
+    /// Parse the section header at the given index.
     pub fn parseSectionHeader(self: Header, file_bytes: []const u8, index: usize) SectionError!SectionHeader {
         if (index >= self.section_count) {
             return error.InvalidSectionIndex;
@@ -742,6 +820,7 @@ pub const Header = struct {
         };
     }
 
+    /// Parse every section header into a newly allocated slice.
     pub fn parseAllSectionHeaders(
         self: Header,
         allocator: std.mem.Allocator,
@@ -758,6 +837,7 @@ pub const Header = struct {
         return sections;
     }
 
+    /// Return the raw bytes of the COFF string table.
     pub fn getStringTable(self: Header, file_bytes: []const u8) []const u8 {
         if (self.symbol_table_offset == 0 or self.symbol_count == 0) {
             return &.{};
@@ -778,6 +858,7 @@ pub const Header = struct {
         return file_bytes[strtab_offset .. strtab_offset + strtab_size];
     }
 
+    /// Parse a single symbol at the given index.
     pub fn parseSymbol(self: Header, file_bytes: []const u8, index: usize) SymbolError!Symbol {
         if (index >= self.symbol_count) {
             return error.InvalidSymbolIndex;
@@ -804,6 +885,7 @@ pub const Header = struct {
         };
     }
 
+    /// Parse every symbol into a newly allocated slice.
     pub fn parseAllSymbols(
         self: Header,
         allocator: std.mem.Allocator,

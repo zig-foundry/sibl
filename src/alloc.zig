@@ -41,6 +41,8 @@ pub const LinkerAllocators = struct {
 pub const ScratchBuffer = struct {
     buffer: [4096]u8 = undefined,
 
+    /// Create a fixed-buffer allocator that draws from the 4 KB scratch area.
+    /// Suitable for short-lived path construction and message formatting.
     pub fn fixedBufferAllocator(self: *ScratchBuffer) std.heap.FixedBufferAllocator {
         return std.heap.FixedBufferAllocator.init(&self.buffer);
     }

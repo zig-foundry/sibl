@@ -20,6 +20,7 @@ pub const ARFMAG = "`\n";
 
 // === Error Sets ===
 
+/// Errors that can occur while parsing or extracting from a static archive.
 pub const Error = error{
     TruncatedArchive,
     InvalidArchiveMagic,
@@ -69,6 +70,7 @@ pub const ExtractedMember = struct {
     allocated_data: ?[]const u8 = null,
     allocated_path: ?[]const u8 = null,
 
+    /// Free the extracted member data if it was copied.
     pub fn deinit(self: *ExtractedMember, allocator: std.mem.Allocator) void {
         if (self.allocated_data) |d| allocator.free(d);
         if (self.allocated_path) |p| allocator.free(p);
@@ -202,6 +204,7 @@ pub const MemberIterator = struct {
     cursor: usize,
     is_thin: bool = false,
 
+    /// Advance to the next member header, or return null at end of archive.
     pub fn next(self: *MemberIterator) Error!?MemberHeader {
         // All archive members must start on an even 2-byte boundary
         self.cursor += (self.cursor & 1);
@@ -274,6 +277,7 @@ pub const SymbolIterator = struct {
     gnu_str_cursor: usize,
     bsd_strtab_start: usize,
 
+    /// Advance to the next symbol in the index, or return null when finished.
     pub fn next(self: *SymbolIterator) Error!?ArchiveSymbol {
         if (self.current_index >= self.symbol_count) return null;
 
@@ -324,6 +328,7 @@ pub const SymbolIterator = struct {
 
 /// Normalized representation for an archive's symbol index table.
 pub const SymbolIndex = struct {
+    /// Kind of symbol index present in the archive (GNU, BSD, or none).
     pub const Kind = enum {
         gnu,
         bsd,
@@ -610,6 +615,7 @@ pub const Archive = struct {
         }
     }
 
+    /// Return an iterator over the members of this archive.
     pub fn iterator(self: *const Archive) MemberIterator {
         return .{
             .file_bytes = self.file_bytes,
@@ -629,6 +635,7 @@ pub const SelectiveExtractor = struct {
     extracted_offsets: std.AutoHashMap(usize, void),
     extracted_members: std.ArrayListUnmanaged(ExtractedMember),
 
+    /// Create a selective extractor that pulls only the members required by the linker.
     pub fn init(allocator: std.mem.Allocator, ar: *const Archive, archive_path: ?[]const u8) SelectiveExtractor {
         return .{
             .allocator = allocator,
@@ -639,6 +646,7 @@ pub const SelectiveExtractor = struct {
         };
     }
 
+    /// Free resources owned by the selective extractor.
     pub fn deinit(self: *SelectiveExtractor) void {
         for (self.extracted_members.items) |*m| {
             m.deinit(self.allocator);
