@@ -260,14 +260,17 @@ pub const Symbol = struct {
     visibility: SymbolVisibility,
     shndx: u16,
 
+    /// Returns true if the symbol is undefined (SHN_UNDEF).
     pub fn isUndefined(self: Symbol) bool {
         return self.shndx == SpecialSectionIndex.UNDEF;
     }
 
+    /// Returns true if the symbol is absolute (SHN_ABS).
     pub fn isAbsolute(self: Symbol) bool {
         return self.shndx == SpecialSectionIndex.ABS;
     }
 
+    /// Resolve the symbol name from the associated string table.
     pub fn getName(self: Symbol, strtab_bytes: []const u8) SectionError![:0]const u8 {
         if (self.name_offset >= strtab_bytes.len) {
             return error.StringTableOutOfBounds;
@@ -603,6 +606,8 @@ pub const Header = struct {
     shnum: u16,
     shstrndx: u16,
 
+    /// Parse an ELF header from the start of a file or object.
+    /// Supports both 32-bit and 64-bit little- and big-endian encodings.
     pub fn parse(bytes: []const u8) HeaderError!Header {
         if (bytes.len < 16) return error.TruncatedHeader;
 

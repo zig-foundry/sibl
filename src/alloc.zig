@@ -1,7 +1,8 @@
 //! Phase 1.2: Memory Allocator Setup for sibl.
 //!
-//! Provides an Arena Allocator for fast bulk allocations and a
-//! stack buffer for small string formatting.
+//! Provides a central arena allocator for fast bulk allocations of symbols,
+//! strings, and parsed object data, plus a fixed 4 KB scratch buffer for
+//! short-lived path and message formatting.
 
 const std = @import("std");
 

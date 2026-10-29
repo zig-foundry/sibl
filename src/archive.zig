@@ -424,6 +424,8 @@ pub const Archive = struct {
     is_thin: bool,
     gnu_strtab: ?[]const u8,
 
+    /// Parse a static archive from its raw bytes.
+    /// Supports standard GNU archives, BSD-style symbol indexes, and thin archives.
     pub fn parse(file_bytes: []const u8) Error!Archive {
         if (file_bytes.len < 8) return error.TruncatedArchive;
 

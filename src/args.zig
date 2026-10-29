@@ -1,7 +1,8 @@
 //! Phase 1.3: Command-Line Interface Argument Parser.
 //!
-//! Parses linker flags (-o, -L, -l, -e, -shared, etc.) without external
-//! packages. Uses slices for fast parsing.
+//! Parses common linker flags (`-o`, `-L`, `-l`, `-e`, `-shared`, `-static`,
+//! `-s`, `-S`, `--format`, `-m`) without external dependencies. All string
+//! data is owned by the caller; the parser only stores slices.
 
 const std = @import("std");
 

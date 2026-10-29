@@ -1,10 +1,14 @@
 //! sibl main entry point.
 //!
-//! Uses Zig 0.17 juicy main (`std.process.Init`).
+//! Uses Zig 0.17 juicy main (`std.process.Init`). Reads command-line arguments,
+//! detects the target, and currently reports the resolved linker configuration.
+//! Full linking logic is implemented in later phases.
 
 const std = @import("std");
 const sibl = @import("sibl");
 
+/// Entry point for the sibl linker executable.
+/// Parses arguments, resolves the target, and prints the active configuration.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();

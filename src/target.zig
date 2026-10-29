@@ -1,7 +1,8 @@
 //! Phase 1.4: Target Detection for sibl.
 //!
-//! Identifies target CPU architecture, binary container format,
-//! byte order, and page alignment.
+//! Identifies target CPU architecture, binary container format, byte order,
+//! and page alignment. Resolves explicit emulation, explicit format, or host
+//! defaults into a complete `TargetInfo` used by later linking stages.
 
 const std = @import("std");
 const builtin = @import("builtin");

@@ -2,6 +2,7 @@
 //!
 //! Configured for Zig 0.17.0.
 //! Sets up the sibl library module, the main executable, and test runners.
+//! The library is exported so other projects can import it as a dependency.
 
 const std = @import("std");
 

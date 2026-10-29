@@ -1,7 +1,8 @@
 //! Phase 2.4: String Table Decoder and Builder for sibl.
 //!
-//! Provides zero-copy reading for input string tables (.strtab, .shstrtab, .dynstr)
-//! and a deduplicating string table builder for generating output binaries.
+//! Provides zero-copy reading for input string tables (`.strtab`, `.shstrtab`,
+//! `.dynstr`) and a deduplicating string table builder for generating output
+//! binaries. Both reader and builder avoid unnecessary copies.
 
 const std = @import("std");
 

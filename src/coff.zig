@@ -695,6 +695,8 @@ pub const Header = struct {
         return (self.characteristics_flags & characteristics.RELOCS_STRIPPED) != 0;
     }
 
+    /// Parse a COFF or PE header from the start of a file.
+    /// Accepts both raw COFF objects and full PE images (with DOS stub).
     pub fn parse(bytes: []const u8) Error!Header {
         if (bytes.len < 20) return error.TruncatedHeader;
 

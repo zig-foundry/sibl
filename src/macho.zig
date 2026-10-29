@@ -1030,6 +1030,8 @@ pub const Header = struct {
         return if (self.is_64bit) 32 else 28;
     }
 
+    /// Parse a Mach-O header from the start of a file.
+    /// Supports both 32-bit and 64-bit little- and big-endian encodings.
     pub fn parse(bytes: []const u8) Error!Header {
         if (bytes.len < 4) return error.TruncatedHeader;
 

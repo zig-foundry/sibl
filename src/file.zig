@@ -1,6 +1,7 @@
 //! Phase 1.5: File Reader and Memory Mapping for sibl.
 //!
 //! Maps input files directly into virtual memory for zero-copy slice access.
+//! Handles both absolute and relative paths and gracefully treats empty files.
 
 const std = @import("std");
 
