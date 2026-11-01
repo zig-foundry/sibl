@@ -20,6 +20,7 @@ pub const Arch = enum {
     x86_64,
     aarch64,
 
+    /// Return a short architecture name.
     pub fn name(self: Arch) []const u8 {
         return switch (self) {
             .x86_64 => "x86_64",
@@ -29,6 +30,7 @@ pub const Arch = enum {
 };
 
 /// x86_64 relocation type codes (AMD64 ABI).
+/// Values match the ELF `R_X86_64_*` numbers.
 pub const X86_64 = struct {
     pub const NONE: u32 = 0;
     pub const @"64": u32 = 1;
@@ -39,6 +41,7 @@ pub const X86_64 = struct {
 };
 
 /// AArch64 relocation type codes (AAELF64).
+/// Values match the ELF `R_AARCH64_*` numbers.
 pub const AArch64 = struct {
     pub const NONE: u32 = 0;
     pub const ABS64: u32 = 257;
@@ -49,6 +52,9 @@ pub const AArch64 = struct {
 };
 
 /// A single relocation to apply.
+///
+/// The caller supplies the already-resolved symbol address (`S`), the addend
+/// (`A`), and the virtual address of the place (`P`).
 pub const Reloc = struct {
     /// Byte offset of the place within the section buffer.
     offset: u64,

@@ -1,8 +1,8 @@
 //! sibl - Something is Better Linker
 //!
 //! A fast, lightweight, zero-dependency static and dynamic linker written in Zig.
-//! This root module re-exports all core parsing, allocation, target, and symbol
-//! resolution utilities so consumers can import a single namespace.
+//! This root module re-exports parsing, allocation, target, symbol, layout, and
+//! relocation utilities so consumers can import a single namespace.
 //!
 //! Supported object formats:
 //! - ELF (Linux, FreeBSD, and other Unix systems)
@@ -20,8 +20,11 @@
 //! - Phase 4: Mach-O parsing
 //! - Phase 5: Static archive parsing
 //! - Phase 6: Global symbol resolution (binding, duplicates, undefined, visibility)
-//! - Phase 7: Section grouping, address layout, segment memory map, and size accounting
+//! - Phase 7: Section grouping, address layout, segment memory map, size accounting
 //! - Phase 8: Relocation engine (x86_64 and AArch64, range checks, in-place patch)
+//!
+//! Consumers typically start with `SymbolTable`, `Layout`, and `reloc.apply`.
+//! See README.md for a short usage example and ROADMAP.md for remaining work.
 
 const std = @import("std");
 
