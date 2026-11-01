@@ -16,6 +16,7 @@ sibl/
     ├── coff.zig
     ├── elf.zig
     ├── file.zig
+    ├── layout.zig
     ├── macho.zig
     ├── main.zig
     ├── root.zig

@@ -13,6 +13,8 @@ A fast, lightweight, zero-dependency static and dynamic linker written in Zig 0.
 - Duplicate strong definition detection
 - Undefined symbol tracking and final resolution check
 - Visibility rules (default / hidden / protected / internal) with export filtering
+- Section grouping (`.text.*` → `.text`) and address/alignment layout
+- Section grouping (`.text.*` → `.text`) and address/alignment layout
 
 ## Building
 
@@ -58,6 +60,7 @@ src/
 ├── macho.zig     Phase 4    — Mach-O parsing
 ├── archive.zig   Phase 5    — static archive (.a / .lib) parsing
 ├── symbol.zig    Phase 6    — global symbol table and resolution
+├── layout.zig    Phase 7    — section grouping and address layout
 ├── root.zig      Public re-exports
 └── main.zig      Linker executable entry point
 ```

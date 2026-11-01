@@ -20,6 +20,7 @@
 //! - Phase 4: Mach-O parsing
 //! - Phase 5: Static archive parsing
 //! - Phase 6: Global symbol resolution (binding, duplicates, undefined, visibility)
+//! - Phase 7.1–7.2: Section grouping and address/alignment calculation
 
 const std = @import("std");
 
@@ -73,6 +74,11 @@ pub const archive = @import("archive.zig");
 /// binding rules, duplicate detection, undefined tracking, and visibility
 /// filtering for exportable symbols.
 pub const symbol = @import("symbol.zig");
+
+/// Section grouping and address/alignment layout (Phase 7.1 – 7.2).
+/// Merges compatible input sections into output sections and assigns
+/// virtual addresses and file offsets with page-size alignment.
+pub const layout = @import("layout.zig");
 
 // === Re-exported Types and Functions ===
 
@@ -274,6 +280,20 @@ pub const SymbolTableError = symbol.Error;
 /// Pick the more restrictive of two visibility values.
 pub const moreRestrictiveVisibility = symbol.moreRestrictiveVisibility;
 
+// Layout types (Phase 7)
+/// Input section contributed by an object file.
+pub const InputSection = layout.InputSection;
+/// Merged output section.
+pub const OutputSection = layout.OutputSection;
+/// Section layout engine.
+pub const Layout = layout.Layout;
+/// Errors that can occur during layout.
+pub const LayoutError = layout.Error;
+/// Canonicalize a section name for grouping.
+pub const canonicalizeSectionName = layout.canonicalizeName;
+/// Align a value up to the given alignment.
+pub const alignTo = layout.alignTo;
+
 // === Test Suite Runner ===
 
 test {
@@ -287,4 +307,5 @@ test {
     _ = macho;
     _ = archive;
     _ = symbol;
+    _ = layout;
 }

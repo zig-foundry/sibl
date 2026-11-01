@@ -73,6 +73,10 @@ pub fn main(init: std.process.Init) !void {
     var symtab = sibl.SymbolTable.init(arena);
     defer symtab.deinit();
 
+    // Phase 7: Section grouping and address layout
+    var layout = sibl.Layout.init(arena, 0x400000, target_info.page_size);
+    defer layout.deinit();
+
     var file_index: u32 = 0;
     for (options.input_files.items) |file_path| {
         var mapped = sibl.MappedFile.open(io, file_path) catch |err| {
@@ -136,6 +140,24 @@ pub fn main(init: std.process.Init) !void {
                             }
                         };
                     }
+                }
+
+                // Phase 7: feed allocatable sections into the layout
+                if (sh.isAlloc() and sh.sh_type != .null) {
+                    const sec_data = sh.getData(mapped.data) catch &.{};
+                    layout.addInput(.{
+                        .name = name,
+                        .data = sec_data,
+                        .alignment = @max(sh.addralign, 1),
+                        .is_alloc = true,
+                        .is_writable = sh.isWritable(),
+                        .is_executable = sh.isExecutable(),
+                        .is_nobits = sh.sh_type == .nobits,
+                        .file_index = file_index,
+                    }) catch |err| {
+                        std.debug.print("sibl: error: layout failed for '{s}': {s}\n", .{ name, @errorName(err) });
+                        std.process.exit(1);
+                    };
                 }
             }
         }
@@ -472,6 +494,30 @@ pub fn main(init: std.process.Init) !void {
             sym.visibilityName(),
             sym.value,
             sym.file_index,
+        });
+    }
+
+    // Phase 7: compute and print section layout
+    layout.computeAddresses();
+    std.debug.print("\n  Section Layout ({d} output sections, virtual=0x{x}, file=0x{x}):\n", .{
+        layout.count(),
+        layout.virtualSize(),
+        layout.fileSize(),
+    });
+    for (layout.sections.items) |sec| {
+        const flags = [_]u8{
+            if (sec.is_alloc) 'A' else '-',
+            if (sec.is_writable) 'W' else '-',
+            if (sec.is_executable) 'X' else '-',
+        };
+        std.debug.print("    {s:<16} va=0x{x:<10} off=0x{x:<8} size=0x{x:<6} align={d:<4} flags={s} members={d}\n", .{
+            sec.name,
+            sec.virtual_address,
+            sec.file_offset,
+            sec.size,
+            sec.alignment,
+            &flags,
+            sec.members.items.len,
         });
     }
 
