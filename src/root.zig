@@ -60,6 +60,11 @@ pub const macho = @import("macho.zig");
 /// and thin archives.
 pub const archive = @import("archive.zig");
 
+/// Global symbol table (Phase 6.1).
+/// Format-agnostic storage of defined and undefined symbols collected
+/// from all input objects and archives.
+pub const symbol = @import("symbol.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -246,6 +251,18 @@ pub const archive_thin_magic = archive.THIN_ARMAG;
 /// Member trailer magic (`` `\n ``).
 pub const archive_trailer_magic = archive.ARFMAG;
 
+// Symbol table types (Phase 6.1)
+/// Format-agnostic symbol.
+pub const Symbol = symbol.Symbol;
+/// Symbol binding (local / global / weak).
+pub const SymbolBinding = symbol.Binding;
+/// Symbol kind (defined / undefined / absolute / common).
+pub const SymbolKind = symbol.Kind;
+/// Central hash map of all symbols.
+pub const SymbolTable = symbol.SymbolTable;
+/// Errors that can occur while managing the symbol table.
+pub const SymbolTableError = symbol.Error;
+
 // === Test Suite Runner ===
 
 test {
@@ -258,4 +275,5 @@ test {
     _ = coff;
     _ = macho;
     _ = archive;
+    _ = symbol;
 }
