@@ -1,8 +1,8 @@
 //! sibl - Something is Better Linker
 //!
 //! A fast, lightweight, zero-dependency static and dynamic linker written in Zig.
-//! This root module re-exports all core parsing, allocation, and target utilities
-//! so consumers can import a single namespace.
+//! This root module re-exports all core parsing, allocation, target, and symbol
+//! resolution utilities so consumers can import a single namespace.
 //!
 //! Supported object formats:
 //! - ELF (Linux, FreeBSD, and other Unix systems)
@@ -12,6 +12,14 @@
 //!
 //! The library is organized by implementation phase. Each phase module is
 //! independently importable and heavily unit-tested.
+//!
+//! Completed phases:
+//! - Phase 1: Project setup, allocators, CLI, target detection, file mapping
+//! - Phase 2: ELF parsing
+//! - Phase 3: PE/COFF parsing
+//! - Phase 4: Mach-O parsing
+//! - Phase 5: Static archive parsing
+//! - Phase 6: Global symbol resolution (binding, duplicates, undefined, visibility)
 
 const std = @import("std");
 
@@ -60,9 +68,10 @@ pub const macho = @import("macho.zig");
 /// and thin archives.
 pub const archive = @import("archive.zig");
 
-/// Global symbol table (Phase 6.1).
-/// Format-agnostic storage of defined and undefined symbols collected
-/// from all input objects and archives.
+/// Global symbol table and resolution (Phase 6.1 – 6.5).
+/// Format-agnostic storage of defined and undefined symbols with strong/weak
+/// binding rules, duplicate detection, undefined tracking, and visibility
+/// filtering for exportable symbols.
 pub const symbol = @import("symbol.zig");
 
 // === Re-exported Types and Functions ===

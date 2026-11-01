@@ -22,6 +22,7 @@ pub const Binding = enum {
     /// Weak definition or weak reference.
     weak,
 
+    /// Return a human-readable name for this Binding.
     pub fn name(self: Binding) []const u8 {
         return switch (self) {
             .local => "local",
@@ -47,6 +48,7 @@ pub const Kind = enum {
     /// Common / tentative definition.
     common,
 
+    /// Return a human-readable name for this Kind.
     pub fn name(self: Kind) []const u8 {
         return switch (self) {
             .defined => "defined",
@@ -81,18 +83,22 @@ pub const Symbol = struct {
     /// Visibility (default / hidden / protected / internal).
     visibility: elf.SymbolVisibility = .default,
 
+    /// Return true if the symbol has a definition (defined, absolute, or common).
     pub fn isDefined(self: Symbol) bool {
         return self.kind.isDefinition();
     }
 
+    /// Return true if the symbol is a pure reference (undefined).
     pub fn isUndefined(self: Symbol) bool {
         return self.kind == .undefined;
     }
 
+    /// Return true if this is a strong (global) definition.
     pub fn isStrong(self: Symbol) bool {
         return self.binding.isStrong() and self.isDefined();
     }
 
+    /// Return true if this is a weak definition.
     pub fn isWeak(self: Symbol) bool {
         return self.binding == .weak and self.isDefined();
     }
@@ -144,13 +150,18 @@ pub const Error = error{
 
 /// Central hash map of all symbols seen so far.
 ///
-/// Implements Phase 6.2 binding rules (strong overrides weak) and
-/// Phase 6.3 duplicate detection (error on multiple strong definitions).
+/// Implements Phase 6.2 binding rules (strong overrides weak),
+/// Phase 6.3 duplicate detection (error on multiple strong definitions),
+/// Phase 6.4 undefined symbol tracking, and Phase 6.5 visibility rules
+/// (more restrictive visibility wins; only exportable symbols are candidates
+/// for the dynamic symbol table).
 pub const SymbolTable = struct {
     /// Maps symbol name → Symbol. Names are owned by this table.
     map: std.StringHashMapUnmanaged(Symbol),
     allocator: std.mem.Allocator,
 
+    /// Initialize an empty symbol table using the given allocator.
+    /// The table owns all stored symbol names.
     pub fn init(allocator: std.mem.Allocator) SymbolTable {
         return .{
             .map = .empty,
@@ -158,6 +169,7 @@ pub const SymbolTable = struct {
         };
     }
 
+    /// Free all owned names and the internal map.
     pub fn deinit(self: *SymbolTable) void {
         var it = self.map.iterator();
         while (it.next()) |entry| {

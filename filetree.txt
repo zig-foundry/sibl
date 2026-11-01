@@ -1,6 +1,14 @@
 sibl/
 ├── build.zig
 ├── build.zig.zon
+├── README.md
+├── ROADMAP.md
+├── filetree.txt
+├── docs/
+│   ├── index.html
+│   ├── main.js
+│   ├── main.wasm
+│   └── server.ts
 └── src/
     ├── alloc.zig
     ├── archive.zig
@@ -12,4 +20,5 @@ sibl/
     ├── main.zig
     ├── root.zig
     ├── strtab.zig
+    ├── symbol.zig
     └── target.zig

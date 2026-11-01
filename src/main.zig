@@ -1,8 +1,10 @@
 //! sibl main entry point.
 //!
 //! Uses Zig 0.17 juicy main (`std.process.Init`). Reads command-line arguments,
-//! detects the target, and currently reports the resolved linker configuration.
-//! Full linking logic is implemented in later phases.
+//! detects the target, maps input files, and performs Phase 6 symbol resolution.
+//! Currently reports the resolved linker configuration and the global symbol
+//! table (including visibility and exportability). Full section merging,
+//! relocation, and binary emission are implemented in later phases.
 
 const std = @import("std");
 const sibl = @import("sibl");
