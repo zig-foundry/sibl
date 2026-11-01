@@ -46,8 +46,8 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 ## Phase 7: Section Merging and Memory Layout
 - [x] **7.1 Section Grouping:** Group matching input sections together (like `.text`, `.rodata`, `.data`, and `.bss`).
 - [x] **7.2 Address and Alignment Calculation:** Calculate base addresses and align each section based on target page sizes.
-- [ ] **7.3 Memory Map Layout:** Lay out program headers and segments in order so the operating system can load them cleanly.
-- [ ] **7.4 Size Accounting:** Compute the final virtual memory size and raw file size for each segment.
+- [x] **7.3 Memory Map Layout:** Lay out program headers and segments in order so the operating system can load them cleanly.
+- [x] **7.4 Size Accounting:** Compute the final virtual memory size and raw file size for each segment.
 
 ## Phase 8: Relocation Engine
 - [ ] **8.1 Relocation Resolver:** Match relocation records to final resolved symbol addresses.

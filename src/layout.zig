@@ -1,8 +1,8 @@
-//! Phase 7.1 – 7.3: Section Grouping, Address/Alignment, and Memory Map Layout.
+//! Phase 7.1 – 7.4: Section Grouping, Address/Alignment, Memory Map, and Size Accounting.
 //!
 //! Groups matching input sections, assigns virtual addresses and file offsets,
-//! then builds PT_LOAD-style segments so the operating system can map the
-//! binary. Follows ELF gABI rules:
+//! builds PT_LOAD-style segments, and computes exact file and memory sizes
+//! for each segment. Follows ELF gABI rules:
 //! - Consecutive sections with the same protection form one segment
 //! - Loadable segments are ordered by virtual address
 //! - `p_vaddr` and `p_offset` are congruent modulo page size
@@ -97,7 +97,35 @@ pub const Segment = struct {
     }
 };
 
-/// Errors that can occur during section layout.
+/// Final size accounting for one segment (Phase 7.4).
+pub const SegmentSize = struct {
+    /// Index into `Layout.segments`.
+    index: usize,
+    /// Bytes stored in the file (`p_filesz`).
+    file_size: u64,
+    /// Bytes occupied in memory (`p_memsz`).
+    memory_size: u64,
+    /// Extra zero-filled bytes in memory (`p_memsz - p_filesz`).
+    bss_size: u64,
+    /// Virtual address of the first byte.
+    virtual_address: u64,
+    /// File offset of the first byte.
+    file_offset: u64,
+};
+
+/// Aggregate size report for the whole image.
+pub const SizeReport = struct {
+    /// Sum of all segment file sizes.
+    total_file_size: u64,
+    /// Sum of all segment memory sizes.
+    total_memory_size: u64,
+    /// Highest virtual address used (end of last ALLOC section).
+    virtual_end: u64,
+    /// Highest file offset used.
+    file_end: u64,
+    /// Per-segment breakdown.
+    segments: []SegmentSize,
+};
 pub const Error = error{
     OutOfMemory,
     EmptyName,
@@ -355,6 +383,81 @@ pub const Layout = struct {
                 }
             }
         }
+    }
+
+    /// Finalize per-segment file and memory sizes (Phase 7.4).
+    ///
+    /// Must be called after `buildSegments`.
+    ///
+    /// Rules:
+    /// - `file_size` = bytes of non-NOBITS content in the segment
+    /// - `memory_size` = virtual span from first to last byte (includes NOBITS)
+    /// - `file_size <= memory_size` is enforced
+    /// - Trailing NOBITS contribute only to `memory_size`
+    pub fn accountSizes(self: *Layout) Error!SizeReport {
+        const items = try self.allocator.alloc(SegmentSize, self.segments.items.len);
+        errdefer self.allocator.free(items);
+
+        var total_file: u64 = 0;
+        var total_mem: u64 = 0;
+        var virtual_end: u64 = self.base_address;
+        var file_end: u64 = 0;
+
+        for (self.segments.items, 0..) |*seg, i| {
+            var file_sz: u64 = 0;
+            var mem_end = seg.virtual_address;
+            var file_end_seg = seg.file_offset;
+
+            for (seg.section_indices.items) |sec_idx| {
+                const sec = self.sections.items[sec_idx];
+                const sec_va_end = sec.virtual_address + sec.size;
+                if (sec_va_end > mem_end) mem_end = sec_va_end;
+
+                if (!sec.is_nobits) {
+                    const sec_file_end = sec.file_offset + sec.size;
+                    if (sec_file_end > file_end_seg) file_end_seg = sec_file_end;
+                    file_sz += sec.size;
+                }
+            }
+
+            const mem_sz = if (mem_end > seg.virtual_address) mem_end - seg.virtual_address else 0;
+            // Prefer the span-based file size when sections have offsets.
+            const span_file = if (file_end_seg > seg.file_offset) file_end_seg - seg.file_offset else 0;
+            const final_file = if (span_file > 0) span_file else file_sz;
+
+            // Enforce gABI: file size must not exceed memory size.
+            const safe_file = if (final_file > mem_sz) mem_sz else final_file;
+
+            seg.file_size = safe_file;
+            seg.memory_size = mem_sz;
+
+            items[i] = .{
+                .index = i,
+                .file_size = safe_file,
+                .memory_size = mem_sz,
+                .bss_size = mem_sz - safe_file,
+                .virtual_address = seg.virtual_address,
+                .file_offset = seg.file_offset,
+            };
+
+            total_file += safe_file;
+            total_mem += mem_sz;
+            if (mem_end > virtual_end) virtual_end = mem_end;
+            if (file_end_seg > file_end) file_end = file_end_seg;
+        }
+
+        return .{
+            .total_file_size = total_file,
+            .total_memory_size = total_mem,
+            .virtual_end = virtual_end,
+            .file_end = file_end,
+            .segments = items,
+        };
+    }
+
+    /// Free a SizeReport previously returned by `accountSizes`.
+    pub fn freeSizeReport(self: *Layout, report: SizeReport) void {
+        self.allocator.free(report.segments);
     }
 };
 
@@ -950,4 +1053,106 @@ test "segment isCongruent for zero alignment" {
         .section_indices = .empty,
     };
     try std.testing.expect(seg.isCongruent());
+}
+
+// === Phase 7.4 tests ===
+
+test "accountSizes reports exact file and memory sizes" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "ABCD", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".data", .data = "\x01\x02", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+    const report = try layout.accountSizes();
+    defer layout.freeSizeReport(report);
+
+    try std.testing.expectEqual(@as(usize, 2), report.segments.len);
+    try std.testing.expect(report.total_file_size >= 6);
+    try std.testing.expect(report.total_memory_size >= report.total_file_size);
+    try std.testing.expect(report.virtual_end > layout.base_address);
+}
+
+test "accountSizes bss contributes only to memory" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".data", .data = "XXXX", .alignment = 4, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".bss", .data = "", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = true, .file_index = 0 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+    const report = try layout.accountSizes();
+    defer layout.freeSizeReport(report);
+
+    try std.testing.expectEqual(@as(usize, 1), report.segments.len);
+    const s = report.segments[0];
+    try std.testing.expect(s.file_size >= 4);
+    try std.testing.expect(s.memory_size >= s.file_size);
+    try std.testing.expectEqual(s.memory_size - s.file_size, s.bss_size);
+}
+
+test "accountSizes enforces file_size <= memory_size" {
+    var layout = Layout.init(std.testing.allocator, 0x1000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "hi", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    layout.computeAddresses();
+    try layout.buildSegments();
+    const report = try layout.accountSizes();
+    defer layout.freeSizeReport(report);
+
+    for (report.segments) |s| {
+        try std.testing.expect(s.file_size <= s.memory_size);
+    }
+}
+
+test "accountSizes empty layout" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+    const report = try layout.accountSizes();
+    defer layout.freeSizeReport(report);
+
+    try std.testing.expectEqual(@as(usize, 0), report.segments.len);
+    try std.testing.expectEqual(@as(u64, 0), report.total_file_size);
+    try std.testing.expectEqual(@as(u64, 0), report.total_memory_size);
+}
+
+test "accountSizes updates segment fields in place" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".rodata", .data = "const", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    layout.computeAddresses();
+    try layout.buildSegments();
+    const report = try layout.accountSizes();
+    defer layout.freeSizeReport(report);
+
+    try std.testing.expectEqual(report.segments[0].file_size, layout.segments.items[0].file_size);
+    try std.testing.expectEqual(report.segments[0].memory_size, layout.segments.items[0].memory_size);
+}
+
+test "accountSizes virtual_end covers all segments" {
+    var layout = Layout.init(std.testing.allocator, 0x800000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "T", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".data", .data = "D", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+    const report = try layout.accountSizes();
+    defer layout.freeSizeReport(report);
+
+    var max_end: u64 = 0;
+    for (report.segments) |s| {
+        const end = s.virtual_address + s.memory_size;
+        if (end > max_end) max_end = end;
+    }
+    try std.testing.expectEqual(max_end, report.virtual_end);
 }

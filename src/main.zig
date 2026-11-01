@@ -526,15 +526,29 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("sibl: error: failed to build segments: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    std.debug.print("\n  Segments ({d}):\n", .{layout.segmentCount()});
-    for (layout.segments.items, 0..) |seg, i| {
-        std.debug.print("    [{d}] va=0x{x:<10} off=0x{x:<8} filesz=0x{x:<6} memsz=0x{x:<6} align={d:<5} flags={s}{s}{s}\n", .{
-            i,
-            seg.virtual_address,
-            seg.file_offset,
-            seg.file_size,
-            seg.memory_size,
-            seg.alignment,
+
+    // Phase 7.4: finalize exact sizes
+    const size_report = layout.accountSizes() catch |err| {
+        std.debug.print("sibl: error: size accounting failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer layout.freeSizeReport(size_report);
+
+    std.debug.print("\n  Segments ({d}, file=0x{x}, mem=0x{x}, vend=0x{x}):\n", .{
+        layout.segmentCount(),
+        size_report.total_file_size,
+        size_report.total_memory_size,
+        size_report.virtual_end,
+    });
+    for (size_report.segments) |s| {
+        const seg = layout.segments.items[s.index];
+        std.debug.print("    [{d}] va=0x{x:<10} off=0x{x:<8} filesz=0x{x:<6} memsz=0x{x:<6} bss=0x{x:<4} flags={s}{s}{s}\n", .{
+            s.index,
+            s.virtual_address,
+            s.file_offset,
+            s.file_size,
+            s.memory_size,
+            s.bss_size,
             if (seg.isReadable()) "R" else "-",
             if (seg.isWritable()) "W" else "-",
             if (seg.isExecutable()) "X" else "-",
