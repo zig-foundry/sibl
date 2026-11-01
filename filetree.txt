@@ -19,6 +19,7 @@ sibl/
     ├── layout.zig
     ├── macho.zig
     ├── main.zig
+    ├── reloc.zig
     ├── root.zig
     ├── strtab.zig
     ├── symbol.zig

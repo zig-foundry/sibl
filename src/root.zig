@@ -21,6 +21,7 @@
 //! - Phase 5: Static archive parsing
 //! - Phase 6: Global symbol resolution (binding, duplicates, undefined, visibility)
 //! - Phase 7: Section grouping, address layout, segment memory map, and size accounting
+//! - Phase 8: Relocation engine (x86_64 and AArch64, range checks, in-place patch)
 
 const std = @import("std");
 
@@ -79,6 +80,11 @@ pub const symbol = @import("symbol.zig");
 /// Merges compatible input sections, assigns virtual addresses, builds
 /// PT_LOAD-style segments, and computes exact file and memory sizes.
 pub const layout = @import("layout.zig");
+
+/// Relocation engine (Phase 8.1 – 8.5).
+/// Resolves symbol addresses, applies x86_64 and AArch64 formulas, checks
+/// ranges, and patches values in place.
+pub const reloc = @import("reloc.zig");
 
 // === Re-exported Types and Functions ===
 
@@ -302,6 +308,22 @@ pub const SegmentSize = layout.SegmentSize;
 /// Aggregate image size report.
 pub const SizeReport = layout.SizeReport;
 
+// Relocation types (Phase 8)
+/// Relocation architecture.
+pub const RelocArch = reloc.Arch;
+/// A single relocation to apply.
+pub const Reloc = reloc.Reloc;
+/// Result of applying one relocation.
+pub const RelocApplied = reloc.Applied;
+/// Errors from the relocation engine.
+pub const RelocError = reloc.Error;
+/// Apply one relocation in place.
+pub const applyReloc = reloc.apply;
+/// Apply a list of relocations.
+pub const applyRelocs = reloc.applyAll;
+/// Human-readable relocation type name.
+pub const relocTypeName = reloc.typeName;
+
 // === Test Suite Runner ===
 
 test {
@@ -316,4 +338,5 @@ test {
     _ = archive;
     _ = symbol;
     _ = layout;
+    _ = reloc;
 }
