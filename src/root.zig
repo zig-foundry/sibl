@@ -20,7 +20,7 @@
 //! - Phase 4: Mach-O parsing
 //! - Phase 5: Static archive parsing
 //! - Phase 6: Global symbol resolution (binding, duplicates, undefined, visibility)
-//! - Phase 7.1–7.2: Section grouping and address/alignment calculation
+//! - Phase 7.1–7.3: Section grouping, address layout, and segment memory map
 
 const std = @import("std");
 
@@ -75,9 +75,9 @@ pub const archive = @import("archive.zig");
 /// filtering for exportable symbols.
 pub const symbol = @import("symbol.zig");
 
-/// Section grouping and address/alignment layout (Phase 7.1 – 7.2).
-/// Merges compatible input sections into output sections and assigns
-/// virtual addresses and file offsets with page-size alignment.
+/// Section grouping, address/alignment, and segment layout (Phase 7.1 – 7.3).
+/// Merges compatible input sections, assigns virtual addresses, and builds
+/// PT_LOAD-style segments with page-congruent offsets.
 pub const layout = @import("layout.zig");
 
 // === Re-exported Types and Functions ===
@@ -293,6 +293,10 @@ pub const LayoutError = layout.Error;
 pub const canonicalizeSectionName = layout.canonicalizeName;
 /// Align a value up to the given alignment.
 pub const alignTo = layout.alignTo;
+/// Loadable segment (PT_LOAD style).
+pub const Segment = layout.Segment;
+/// Segment protection flags (R/W/X).
+pub const SegmentFlags = layout.SegmentFlags;
 
 // === Test Suite Runner ===
 

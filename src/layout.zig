@@ -1,12 +1,12 @@
-//! Phase 7.1 – 7.2: Section Grouping and Address/Alignment Calculation.
+//! Phase 7.1 – 7.3: Section Grouping, Address/Alignment, and Memory Map Layout.
 //!
-//! Groups matching input sections (`.text.*` → `.text`, `.rodata.*` → `.rodata`,
-//! etc.) into output sections, then assigns virtual addresses and file offsets
-//! with proper alignment. Follows common ELF linker practice:
-//! - Canonical section names for grouping
-//! - Page-size alignment when protection changes
-//! - `.bss` occupies virtual memory but no file space
-//! - `p_vaddr` / `p_offset` congruence is prepared for later segment emission
+//! Groups matching input sections, assigns virtual addresses and file offsets,
+//! then builds PT_LOAD-style segments so the operating system can map the
+//! binary. Follows ELF gABI rules:
+//! - Consecutive sections with the same protection form one segment
+//! - Loadable segments are ordered by virtual address
+//! - `p_vaddr` and `p_offset` are congruent modulo page size
+//! - `p_memsz >= p_filesz` (`.bss` extends memory without file bytes)
 
 const std = @import("std");
 
@@ -51,6 +51,52 @@ pub const OutputSection = struct {
     }
 };
 
+/// Program header / segment flags (ELF PF_* style).
+pub const SegmentFlags = struct {
+    pub const R: u32 = 4;
+    pub const W: u32 = 2;
+    pub const X: u32 = 1;
+};
+
+/// A loadable segment built from one or more consecutive output sections
+/// that share the same memory protection.
+pub const Segment = struct {
+    /// Virtual address of the first byte.
+    virtual_address: u64,
+    /// File offset of the first byte (congruent with VA modulo page size).
+    file_offset: u64,
+    /// Bytes present in the file (excludes trailing NOBITS).
+    file_size: u64,
+    /// Bytes occupied in memory (includes NOBITS / .bss).
+    memory_size: u64,
+    /// Alignment (typically the page size).
+    alignment: u64,
+    /// Protection flags (R/W/X).
+    flags: u32,
+    /// Indices of output sections that belong to this segment.
+    section_indices: std.ArrayListUnmanaged(usize),
+
+    pub fn deinit(self: *Segment, allocator: std.mem.Allocator) void {
+        self.section_indices.deinit(allocator);
+    }
+
+    pub fn isReadable(self: Segment) bool {
+        return (self.flags & SegmentFlags.R) != 0;
+    }
+    pub fn isWritable(self: Segment) bool {
+        return (self.flags & SegmentFlags.W) != 0;
+    }
+    pub fn isExecutable(self: Segment) bool {
+        return (self.flags & SegmentFlags.X) != 0;
+    }
+
+    /// Return true if p_vaddr and p_offset are congruent modulo alignment.
+    pub fn isCongruent(self: Segment) bool {
+        if (self.alignment <= 1) return true;
+        return (self.virtual_address % self.alignment) == (self.file_offset % self.alignment);
+    }
+};
+
 /// Errors that can occur during section layout.
 pub const Error = error{
     OutOfMemory,
@@ -60,6 +106,7 @@ pub const Error = error{
 /// Layout engine that groups input sections and assigns addresses.
 pub const Layout = struct {
     sections: std.ArrayListUnmanaged(OutputSection),
+    segments: std.ArrayListUnmanaged(Segment),
     allocator: std.mem.Allocator,
     /// Preferred base virtual address (e.g. 0x400000 for non-PIE ELF).
     base_address: u64,
@@ -69,6 +116,7 @@ pub const Layout = struct {
     pub fn init(allocator: std.mem.Allocator, base_address: u64, page_size: u64) Layout {
         return .{
             .sections = .empty,
+            .segments = .empty,
             .allocator = allocator,
             .base_address = base_address,
             .page_size = if (page_size == 0) 4096 else page_size,
@@ -80,6 +128,10 @@ pub const Layout = struct {
             sec.deinit(self.allocator);
         }
         self.sections.deinit(self.allocator);
+        for (self.segments.items) |*seg| {
+            seg.deinit(self.allocator);
+        }
+        self.segments.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -218,6 +270,92 @@ pub const Layout = struct {
         }
         return end;
     }
+
+    /// Number of loadable segments created by `buildSegments`.
+    pub fn segmentCount(self: *const Layout) usize {
+        return self.segments.items.len;
+    }
+
+    /// Build PT_LOAD-style segments from the current section layout.
+    ///
+    /// Must be called after `computeAddresses`.
+    ///
+    /// Rules (Phase 7.3):
+    /// - Only ALLOC sections participate
+    /// - Consecutive sections with identical protection (R/W/X) form one segment
+    /// - Segments are ordered by virtual address
+    /// - `p_vaddr % page_size == p_offset % page_size`
+    /// - `memory_size >= file_size` (NOBITS extends memory)
+    /// - Alignment is the page size
+    pub fn buildSegments(self: *Layout) Error!void {
+        // Clear any previous segments.
+        for (self.segments.items) |*seg| {
+            seg.deinit(self.allocator);
+        }
+        self.segments.clearRetainingCapacity();
+
+        var current: ?Segment = null;
+
+        for (self.sections.items, 0..) |sec, idx| {
+            if (!sec.is_alloc) continue;
+
+            const flags = protectionFlags(sec.is_writable, sec.is_executable);
+            const can_extend = if (current) |*cur|
+                cur.flags == flags and sec.virtual_address >= cur.virtual_address
+            else
+                false;
+
+            if (can_extend) {
+                var cur = &current.?;
+                try cur.section_indices.append(self.allocator, idx);
+                const end_va = sec.virtual_address + sec.size;
+                cur.memory_size = end_va - cur.virtual_address;
+                if (!sec.is_nobits) {
+                    const end_off = sec.file_offset + sec.size;
+                    if (end_off > cur.file_offset) {
+                        cur.file_size = end_off - cur.file_offset;
+                    }
+                }
+            } else {
+                if (current) |seg| {
+                    try self.segments.append(self.allocator, seg);
+                }
+                var indices: std.ArrayListUnmanaged(usize) = .empty;
+                try indices.append(self.allocator, idx);
+
+                const file_size: u64 = if (sec.is_nobits) 0 else sec.size;
+                current = .{
+                    .virtual_address = sec.virtual_address,
+                    .file_offset = if (sec.is_nobits) 0 else sec.file_offset,
+                    .file_size = file_size,
+                    .memory_size = sec.size,
+                    .alignment = self.page_size,
+                    .flags = flags,
+                    .section_indices = indices,
+                };
+            }
+        }
+
+        if (current) |seg| {
+            try self.segments.append(self.allocator, seg);
+        }
+
+        // Enforce congruence: adjust file_offset so it matches VA modulo page size.
+        for (self.segments.items) |*seg| {
+            if (seg.alignment > 1) {
+                const va_mod = seg.virtual_address % seg.alignment;
+                const off_mod = seg.file_offset % seg.alignment;
+                if (va_mod != off_mod) {
+                    // Bump file offset up to the next congruent value.
+                    const delta = if (va_mod >= off_mod)
+                        va_mod - off_mod
+                    else
+                        seg.alignment - (off_mod - va_mod);
+                    seg.file_offset += delta;
+                }
+            }
+        }
+    }
 };
 
 /// Canonicalize a section name for grouping.
@@ -259,6 +397,14 @@ fn flagsCompatible(out: *const OutputSection, input: *const InputSection) bool {
         out.is_writable == input.is_writable and
         out.is_executable == input.is_executable and
         out.is_nobits == input.is_nobits;
+}
+
+/// Map writable/executable bits to ELF-style PF flags (always readable).
+fn protectionFlags(writable: bool, executable: bool) u32 {
+    var f: u32 = SegmentFlags.R;
+    if (writable) f |= SegmentFlags.W;
+    if (executable) f |= SegmentFlags.X;
+    return f;
 }
 
 /// Align `value` up to the next multiple of `alignment`.
@@ -520,4 +666,288 @@ test "member alignment pads inside output section" {
     const text = layout.get(".text") orelse return error.TestExpectedSection;
     // First member 1 byte, then pad to 4, then 2 bytes → size >= 6.
     try std.testing.expect(text.size >= 6);
+}
+
+// === Phase 7.3 tests ===
+
+test "buildSegments creates one segment for same protection" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{
+        .name = ".text",
+        .data = "\x90\x90\x90\x90",
+        .alignment = 4,
+        .is_alloc = true,
+        .is_writable = false,
+        .is_executable = true,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+    try layout.addInput(.{
+        .name = ".text.hot",
+        .data = "\xC3",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = false,
+        .is_executable = true,
+        .is_nobits = false,
+        .file_index = 1,
+    });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+    const seg = layout.segments.items[0];
+    try std.testing.expect(seg.isExecutable());
+    try std.testing.expect(!seg.isWritable());
+    try std.testing.expectEqual(@as(usize, 1), seg.section_indices.items.len);
+}
+
+test "buildSegments splits on protection change" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{
+        .name = ".text",
+        .data = "code",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = false,
+        .is_executable = true,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+    try layout.addInput(.{
+        .name = ".rodata",
+        .data = "ro",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = false,
+        .is_executable = false,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+    try layout.addInput(.{
+        .name = ".data",
+        .data = "\x01\x02",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = true,
+        .is_executable = false,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(usize, 3), layout.segmentCount());
+    try std.testing.expect(layout.segments.items[0].isExecutable());
+    try std.testing.expect(!layout.segments.items[1].isExecutable());
+    try std.testing.expect(!layout.segments.items[1].isWritable());
+    try std.testing.expect(layout.segments.items[2].isWritable());
+}
+
+test "segments are ordered by virtual address" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "A", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".data", .data = "B", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expect(layout.segments.items[0].virtual_address <= layout.segments.items[1].virtual_address);
+}
+
+test "bss extends memory size but not file size" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{
+        .name = ".data",
+        .data = "\x01\x02\x03\x04",
+        .alignment = 4,
+        .is_alloc = true,
+        .is_writable = true,
+        .is_executable = false,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+    try layout.addInput(.{
+        .name = ".bss",
+        .data = "",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = true,
+        .is_executable = false,
+        .is_nobits = true,
+        .file_index = 0,
+    });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+    const seg = layout.segments.items[0];
+    try std.testing.expect(seg.memory_size >= seg.file_size);
+    try std.testing.expect(seg.file_size >= 4);
+}
+
+test "segment congruence modulo page size" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{
+        .name = ".text",
+        .data = "hello",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = false,
+        .is_executable = true,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    const seg = layout.segments.items[0];
+    try std.testing.expect(seg.isCongruent());
+    try std.testing.expectEqual(seg.virtual_address % 4096, seg.file_offset % 4096);
+}
+
+test "empty layout produces no segments" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+    try std.testing.expectEqual(@as(usize, 0), layout.segmentCount());
+}
+
+test "non-alloc sections are ignored by segments" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{
+        .name = ".debug_info",
+        .data = "dbg",
+        .alignment = 1,
+        .is_alloc = false,
+        .is_writable = false,
+        .is_executable = false,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+    try layout.addInput(.{
+        .name = ".text",
+        .data = "X",
+        .alignment = 1,
+        .is_alloc = true,
+        .is_writable = false,
+        .is_executable = true,
+        .is_nobits = false,
+        .file_index = 0,
+    });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+    try std.testing.expect(layout.segments.items[0].isExecutable());
+}
+
+test "segment flags match section protection" {
+    var layout = Layout.init(std.testing.allocator, 0x1000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "c", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".rodata", .data = "r", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".data", .data = "w", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(SegmentFlags.R | SegmentFlags.X, layout.segments.items[0].flags);
+    try std.testing.expectEqual(SegmentFlags.R, layout.segments.items[1].flags);
+    try std.testing.expectEqual(SegmentFlags.R | SegmentFlags.W, layout.segments.items[2].flags);
+}
+
+test "rebuildSegments replaces previous segments" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "A", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    layout.computeAddresses();
+    try layout.buildSegments();
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+
+    try layout.buildSegments();
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+}
+
+test "data and bss share one writable segment" {
+    var layout = Layout.init(std.testing.allocator, 0x200000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".data", .data = "\x00\x00\x00\x00", .alignment = 4, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".bss", .data = "", .alignment = 8, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = true, .file_index = 0 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+    try std.testing.expect(layout.segments.items[0].isWritable());
+    try std.testing.expect(layout.segments.items[0].memory_size > layout.segments.items[0].file_size);
+}
+
+test "segment alignment equals page size" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 65536);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "Z", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(u64, 65536), layout.segments.items[0].alignment);
+}
+
+test "multiple text sections stay in one RX segment" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text.a", .data = "aa", .alignment = 2, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".text.b", .data = "bbb", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 1 });
+    try layout.addInput(.{ .name = ".text.c", .data = "c", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 2 });
+
+    layout.computeAddresses();
+    try layout.buildSegments();
+
+    try std.testing.expectEqual(@as(usize, 1), layout.segmentCount());
+    try std.testing.expect(layout.segments.items[0].isExecutable());
+    try std.testing.expect(layout.segments.items[0].file_size >= 6);
+}
+
+test "protectionFlags helper values" {
+    try std.testing.expectEqual(SegmentFlags.R, protectionFlags(false, false));
+    try std.testing.expectEqual(SegmentFlags.R | SegmentFlags.W, protectionFlags(true, false));
+    try std.testing.expectEqual(SegmentFlags.R | SegmentFlags.X, protectionFlags(false, true));
+    try std.testing.expectEqual(SegmentFlags.R | SegmentFlags.W | SegmentFlags.X, protectionFlags(true, true));
+}
+
+test "segment isCongruent for zero alignment" {
+    const seg = Segment{
+        .virtual_address = 100,
+        .file_offset = 50,
+        .file_size = 10,
+        .memory_size = 10,
+        .alignment = 0,
+        .flags = SegmentFlags.R,
+        .section_indices = .empty,
+    };
+    try std.testing.expect(seg.isCongruent());
 }
