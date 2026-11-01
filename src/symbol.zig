@@ -1,9 +1,12 @@
-//! Phase 6.1–6.3: Global Symbol Table, Binding Rules, and Duplicate Detection.
+//! Phase 6.1–6.5: Global Symbol Table, Binding, Duplicates, Undefined Tracking,
+//! and Visibility Rules.
 //!
 //! Provides a format-agnostic symbol representation and a central hash map
 //! that stores every defined and undefined symbol collected from input
 //! objects and archives. Strong definitions override weak ones; multiple
-//! strong definitions for the same symbol are reported as errors.
+//! strong definitions for the same symbol are reported as errors. Visibility
+//! is resolved so the most restrictive rule wins, and only exportable symbols
+//! are candidates for the dynamic symbol table.
 
 const std = @import("std");
 const elf = @import("elf.zig");
@@ -93,7 +96,41 @@ pub const Symbol = struct {
     pub fn isWeak(self: Symbol) bool {
         return self.binding == .weak and self.isDefined();
     }
+
+    /// Return true if the symbol is hidden or internal (not visible outside).
+    pub fn isHidden(self: Symbol) bool {
+        return self.visibility == .hidden or self.visibility == .internal;
+    }
+
+    /// Return true if this symbol should appear in a dynamic symbol table.
+    /// Local symbols and hidden/internal symbols are never exported.
+    pub fn isExportable(self: Symbol) bool {
+        if (self.binding == .local) return false;
+        if (self.isHidden()) return false;
+        if (!self.isDefined()) return false;
+        return true;
+    }
+
+    /// Return a short visibility name.
+    pub fn visibilityName(self: Symbol) []const u8 {
+        return self.visibility.name();
+    }
 };
+
+/// Return the more restrictive of two visibility values.
+/// Order (most → least restrictive): internal/hidden > protected > default.
+pub fn moreRestrictiveVisibility(a: elf.SymbolVisibility, b: elf.SymbolVisibility) elf.SymbolVisibility {
+    const rank = struct {
+        fn r(v: elf.SymbolVisibility) u8 {
+            return switch (v) {
+                .internal, .hidden => 3,
+                .protected => 2,
+                .default => 1,
+            };
+        }
+    };
+    return if (rank.r(a) >= rank.r(b)) a else b;
+}
 
 /// Errors that can occur while building or querying the symbol table.
 pub const Error = error{
@@ -101,6 +138,8 @@ pub const Error = error{
     EmptyName,
     /// Two or more strong definitions exist for the same symbol.
     DuplicateStrongDefinition,
+    /// One or more symbols remain undefined after all inputs are processed.
+    UnresolvedSymbols,
 };
 
 /// Central hash map of all symbols seen so far.
@@ -138,7 +177,7 @@ pub const SymbolTable = struct {
         return self.map.get(name);
     }
 
-    /// Insert a symbol, applying binding rules.
+    /// Insert a symbol, applying binding and visibility rules.
     ///
     /// Resolution order:
     /// - Undefined is replaced by any definition.
@@ -148,16 +187,22 @@ pub const SymbolTable = struct {
     /// - A second weak definition is ignored (first one wins).
     /// - Local symbols are stored but do not participate in strong/weak
     ///   conflict detection with global symbols of the same name.
+    /// - Visibility: the more restrictive of the two wins (hidden/internal
+    ///   > protected > default).
     pub fn add(self: *SymbolTable, symbol: Symbol) Error!void {
         if (symbol.name.len == 0) return error.EmptyName;
 
         if (self.map.getPtr(symbol.name)) |existing| {
+            // Apply more restrictive visibility even if we keep the existing symbol.
+            const merged_vis = moreRestrictiveVisibility(existing.visibility, symbol.visibility);
+
             // Local symbols never conflict with anything already present.
             if (symbol.binding == .local or existing.binding == .local) {
                 // Prefer the non-local symbol if one exists.
                 if (existing.binding == .local and symbol.binding != .local) {
-                    // Replace local with global/weak.
+                    // Replace local with global/weak, but keep stricter visibility.
                 } else {
+                    existing.visibility = merged_vis;
                     return; // keep existing
                 }
             } else {
@@ -174,10 +219,13 @@ pub const SymbolTable = struct {
                 if (new_strong and !existing_strong) {
                     // fall through to replace
                 } else if (existing_strong) {
+                    existing.visibility = merged_vis;
                     return; // keep strong
                 } else if (existing_is_def and existing.binding == .weak and new_is_def and symbol.binding == .weak) {
+                    existing.visibility = merged_vis;
                     return; // first weak wins
                 } else if (!new_is_def) {
+                    existing.visibility = merged_vis;
                     return; // pure undefined does not override a definition
                 }
                 // else: new definition replaces existing (e.g. def over undef, strong over weak)
@@ -193,6 +241,12 @@ pub const SymbolTable = struct {
             gop.key_ptr.* = owned_name;
         }
 
+        // Preserve stricter visibility if we are replacing.
+        const final_vis = if (gop.found_existing)
+            moreRestrictiveVisibility(gop.value_ptr.visibility, symbol.visibility)
+        else
+            symbol.visibility;
+
         gop.value_ptr.* = .{
             .name = owned_name,
             .binding = symbol.binding,
@@ -201,7 +255,7 @@ pub const SymbolTable = struct {
             .size = symbol.size,
             .section_index = symbol.section_index,
             .file_index = symbol.file_index,
-            .visibility = symbol.visibility,
+            .visibility = final_vis,
         };
     }
 
@@ -227,6 +281,60 @@ pub const SymbolTable = struct {
             if (entry.value_ptr.isUndefined()) n += 1;
         }
         return n;
+    }
+
+    /// Collect the names of all currently undefined symbols into a new slice.
+    /// The caller owns the returned slice (names themselves are still owned by the table).
+    pub fn collectUndefined(self: *const SymbolTable, allocator: std.mem.Allocator) ![]const []const u8 {
+        const n = self.undefinedCount();
+        const names = try allocator.alloc([]const u8, n);
+        errdefer allocator.free(names);
+
+        var i: usize = 0;
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.isUndefined()) {
+                names[i] = entry.value_ptr.name;
+                i += 1;
+            }
+        }
+        return names;
+    }
+
+    /// Return an error if any symbols remain undefined.
+    /// Used at the end of the link to ensure every needed symbol was found.
+    pub fn checkResolved(self: *const SymbolTable) Error!void {
+        if (self.undefinedCount() > 0) {
+            return error.UnresolvedSymbols;
+        }
+    }
+
+    /// Count symbols that are eligible for export (dynamic symbol table).
+    pub fn exportableCount(self: *const SymbolTable) usize {
+        var n: usize = 0;
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.isExportable()) n += 1;
+        }
+        return n;
+    }
+
+    /// Collect names of symbols that should be exported.
+    /// Caller owns the returned slice.
+    pub fn collectExportable(self: *const SymbolTable, allocator: std.mem.Allocator) ![]const []const u8 {
+        const n = self.exportableCount();
+        const names = try allocator.alloc([]const u8, n);
+        errdefer allocator.free(names);
+
+        var i: usize = 0;
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.isExportable()) {
+                names[i] = entry.value_ptr.name;
+                i += 1;
+            }
+        }
+        return names;
     }
 
     // === Format-specific ingestion helpers ===
@@ -603,4 +711,163 @@ test "undefinedCount tracks unresolved symbols" {
     try table.add(.{ .name = "malloc", .binding = .global, .kind = .undefined });
 
     try std.testing.expectEqual(@as(usize, 2), table.undefinedCount());
+}
+
+test "collectUndefined returns all unresolved names" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{ .name = "main", .binding = .global, .kind = .defined });
+    try table.add(.{ .name = "puts", .binding = .global, .kind = .undefined });
+    try table.add(.{ .name = "exit", .binding = .global, .kind = .undefined });
+
+    const names = try table.collectUndefined(std.testing.allocator);
+    defer std.testing.allocator.free(names);
+
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+
+    var found_puts = false;
+    var found_exit = false;
+    for (names) |n| {
+        if (std.mem.eql(u8, n, "puts")) found_puts = true;
+        if (std.mem.eql(u8, n, "exit")) found_exit = true;
+    }
+    try std.testing.expect(found_puts);
+    try std.testing.expect(found_exit);
+}
+
+test "checkResolved succeeds when all symbols are defined" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{ .name = "main", .binding = .global, .kind = .defined });
+    try table.add(.{ .name = "_start", .binding = .global, .kind = .defined });
+
+    try table.checkResolved();
+}
+
+test "checkResolved fails when symbols remain undefined" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{ .name = "main", .binding = .global, .kind = .defined });
+    try table.add(.{ .name = "printf", .binding = .global, .kind = .undefined });
+
+    try std.testing.expectError(error.UnresolvedSymbols, table.checkResolved());
+}
+
+test "definition clears previously undefined symbol" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{ .name = "foo", .binding = .global, .kind = .undefined });
+    try std.testing.expectError(error.UnresolvedSymbols, table.checkResolved());
+
+    try table.add(.{ .name = "foo", .binding = .global, .kind = .defined, .value = 1 });
+    try table.checkResolved();
+    try std.testing.expectEqual(@as(usize, 0), table.undefinedCount());
+}
+
+test "hidden symbol is not exportable" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "internal_fn",
+        .binding = .global,
+        .kind = .defined,
+        .visibility = .hidden,
+    });
+
+    try table.add(.{
+        .name = "public_fn",
+        .binding = .global,
+        .kind = .defined,
+        .visibility = .default,
+    });
+
+    try table.add(.{
+        .name = "local_fn",
+        .binding = .local,
+        .kind = .defined,
+        .visibility = .default,
+    });
+
+    const hidden = table.get("internal_fn") orelse return error.TestExpectedSymbol;
+    try std.testing.expect(hidden.isHidden());
+    try std.testing.expect(!hidden.isExportable());
+
+    const public = table.get("public_fn") orelse return error.TestExpectedSymbol;
+    try std.testing.expect(public.isExportable());
+
+    const local = table.get("local_fn") orelse return error.TestExpectedSymbol;
+    try std.testing.expect(!local.isExportable());
+
+    try std.testing.expectEqual(@as(usize, 1), table.exportableCount());
+}
+
+test "more restrictive visibility wins" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "shared",
+        .binding = .global,
+        .kind = .defined,
+        .visibility = .default,
+        .value = 1,
+    });
+
+    try table.add(.{
+        .name = "shared",
+        .binding = .weak,
+        .kind = .defined,
+        .visibility = .hidden,
+        .value = 2,
+    });
+
+    const sym = table.get("shared") orelse return error.TestExpectedSymbol;
+    // Strong definition kept, but visibility became hidden.
+    try std.testing.expectEqual(Binding.global, sym.binding);
+    try std.testing.expectEqual(@as(u64, 1), sym.value);
+    try std.testing.expectEqual(elf.SymbolVisibility.hidden, sym.visibility);
+    try std.testing.expect(!sym.isExportable());
+}
+
+test "protected is exportable but hidden is not" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "prot",
+        .binding = .global,
+        .kind = .defined,
+        .visibility = .protected,
+    });
+
+    try table.add(.{
+        .name = "hid",
+        .binding = .global,
+        .kind = .defined,
+        .visibility = .hidden,
+    });
+
+    try std.testing.expect((table.get("prot") orelse return error.TestExpectedSymbol).isExportable());
+    try std.testing.expect(!(table.get("hid") orelse return error.TestExpectedSymbol).isExportable());
+}
+
+test "collectExportable returns only exportable names" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{ .name = "main", .binding = .global, .kind = .defined, .visibility = .default });
+    try table.add(.{ .name = "hidden_main", .binding = .global, .kind = .defined, .visibility = .hidden });
+    try table.add(.{ .name = "static_fn", .binding = .local, .kind = .defined });
+    try table.add(.{ .name = "printf", .binding = .global, .kind = .undefined });
+
+    const names = try table.collectExportable(std.testing.allocator);
+    defer std.testing.allocator.free(names);
+
+    try std.testing.expectEqual(@as(usize, 1), names.len);
+    try std.testing.expectEqualStrings("main", names[0]);
 }

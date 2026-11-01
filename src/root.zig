@@ -251,7 +251,7 @@ pub const archive_thin_magic = archive.THIN_ARMAG;
 /// Member trailer magic (`` `\n ``).
 pub const archive_trailer_magic = archive.ARFMAG;
 
-// Symbol table types (Phase 6.1)
+// Symbol table types (Phase 6)
 /// Format-agnostic symbol.
 pub const Symbol = symbol.Symbol;
 /// Symbol binding (local / global / weak).
@@ -262,6 +262,8 @@ pub const SymbolKind = symbol.Kind;
 pub const SymbolTable = symbol.SymbolTable;
 /// Errors that can occur while managing the symbol table.
 pub const SymbolTableError = symbol.Error;
+/// Pick the more restrictive of two visibility values.
+pub const moreRestrictiveVisibility = symbol.moreRestrictiveVisibility;
 
 // === Test Suite Runner ===
 

@@ -40,8 +40,8 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 - [x] **6.1 Symbol Table Creation:** Build a central hash map to store all defined and undefined symbols.
 - [x] **6.2 Binding Rules:** Resolve conflicts between weak symbols and strong symbols properly.
 - [x] **6.3 Duplicate Detection:** Report clear errors when multiple strong definitions exist for the same symbol.
-- [ ] **6.4 Undefined Symbol Tracking:** Track missing symbols and ensure every needed symbol is found before linking stops.
-- [ ] **6.5 Visibility Rules:** Handle local, hidden, and default visibility rules.
+- [x] **6.4 Undefined Symbol Tracking:** Track missing symbols and ensure every needed symbol is found before linking stops.
+- [x] **6.5 Visibility Rules:** Handle local, hidden, and default visibility rules.
 
 ## Phase 7: Section Merging and Memory Layout
 - [ ] **7.1 Section Grouping:** Group matching input sections together (like `.text`, `.rodata`, `.data`, and `.bss`).

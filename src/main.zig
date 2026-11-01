@@ -448,9 +448,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Phase 6: print resolved symbol table
-    std.debug.print("\n  Resolved Symbols ({d} total, {d} undefined):\n", .{
+    std.debug.print("\n  Resolved Symbols ({d} total, {d} undefined, {d} exportable):\n", .{
         symtab.count(),
         symtab.undefinedCount(),
+        symtab.exportableCount(),
     });
     var it = symtab.iterator();
     var printed: usize = 0;
@@ -460,12 +461,29 @@ pub fn main(init: std.process.Init) !void {
             break;
         }
         const sym = entry.value_ptr.*;
-        std.debug.print("    {s:<24} {s:<8} {s:<10} value=0x{x:<8} file={d}\n", .{
+        const export_mark = if (sym.isExportable()) "*" else " ";
+        std.debug.print("    {s} {s:<22} {s:<8} {s:<10} {s:<10} value=0x{x:<8} file={d}\n", .{
+            export_mark,
             sym.name,
             sym.binding.name(),
             sym.kind.name(),
+            sym.visibilityName(),
             sym.value,
             sym.file_index,
         });
+    }
+
+    // Phase 6.4: fail if any symbols remain undefined (unless building a shared library)
+    if (!options.is_shared) {
+        if (symtab.checkResolved()) |_| {} else |err| {
+            if (err == error.UnresolvedSymbols) {
+                const undef_names = symtab.collectUndefined(arena) catch &.{};
+                std.debug.print("\nsibl: error: unresolved symbols ({d}):\n", .{undef_names.len});
+                for (undef_names) |name| {
+                    std.debug.print("  - {s}\n", .{name});
+                }
+                std.process.exit(1);
+            }
+        }
     }
 }
