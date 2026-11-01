@@ -321,6 +321,14 @@ pub const RelocError = reloc.Error;
 pub const applyReloc = reloc.apply;
 /// Apply a list of relocations.
 pub const applyRelocs = reloc.applyAll;
+/// Resolve a pending relocation against a symbol table.
+pub const resolveReloc = reloc.resolve;
+/// Resolve and apply pending relocations.
+pub const resolveAndApplyRelocs = reloc.resolveAndApply;
+/// Pending relocation waiting for a symbol address.
+pub const PendingReloc = reloc.PendingReloc;
+/// Symbol name/address pair for resolution.
+pub const SymbolAddr = reloc.SymbolAddr;
 /// Human-readable relocation type name.
 pub const relocTypeName = reloc.typeName;
 

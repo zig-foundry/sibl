@@ -72,6 +72,8 @@ pub const Error = error{
     Overflow,
     /// Buffer is too small for the write width.
     Truncated,
+    /// Symbol name was not found in the address table.
+    UnresolvedSymbol,
 };
 
 /// Result of a single successful relocation.
@@ -168,13 +170,13 @@ fn applyAArch64(buffer: []u8, reloc: Reloc, S: i64, A: i64, P: i64) Error!Applie
             return .{ .offset = reloc.offset, .type_id = reloc.type_id, .value = value, .bytes_written = 8 };
         },
         AArch64.ADR_PREL_PG_HI21 => {
-            // Page(S+A) - Page(P), encode into ADRP immediate.
+            // X = Page(S+A) - Page(P). Encode X>>12 into the ADRP immediate.
             const page_s = page(S +% A);
             const page_p = page(P);
             const value = page_s -% page_p;
-            // Check ±2^32 range (33-bit signed after page shift semantics).
+            // AAELF: -2^32 <= X < 2^32
             try checkSigned(value, 33);
-            try patchAdrp(buffer, reloc.offset, value);
+            try patchAdrp(buffer, reloc.offset, value >> 12);
             return .{ .offset = reloc.offset, .type_id = reloc.type_id, .value = value, .bytes_written = 4 };
         },
         AArch64.ADD_ABS_LO12_NC => {
@@ -285,6 +287,52 @@ pub fn typeName(arch: Arch, type_id: u32) []const u8 {
     };
 }
 
+/// Unresolved relocation waiting for a symbol address (Phase 8.1).
+pub const PendingReloc = struct {
+    offset: u64,
+    type_id: u32,
+    /// Name of the symbol to resolve.
+    symbol_name: []const u8,
+    addend: i64,
+    place_address: u64,
+};
+
+/// Resolve a pending relocation against a symbol address table.
+///
+/// `symbols` is a slice of name/address pairs. Returns `error.UnresolvedSymbol`
+/// if the name is not found.
+pub fn resolve(pending: PendingReloc, symbols: []const SymbolAddr) Error!Reloc {
+    for (symbols) |sym| {
+        if (std.mem.eql(u8, sym.name, pending.symbol_name)) {
+            return .{
+                .offset = pending.offset,
+                .type_id = pending.type_id,
+                .symbol_address = sym.address,
+                .addend = pending.addend,
+                .place_address = pending.place_address,
+            };
+        }
+    }
+    return error.UnresolvedSymbol;
+}
+
+/// Name + final address pair used by `resolve`.
+pub const SymbolAddr = struct {
+    name: []const u8,
+    address: u64,
+};
+
+/// Resolve and apply a list of pending relocations.
+pub fn resolveAndApply(arch: Arch, buffer: []u8, pending: []const PendingReloc, symbols: []const SymbolAddr) Error!usize {
+    var n: usize = 0;
+    for (pending) |p| {
+        const r = try resolve(p, symbols);
+        _ = try apply(arch, buffer, r);
+        n += 1;
+    }
+    return n;
+}
+
 // === Unit Tests ===
 
 test "x86_64 R_X86_64_64 absolute" {
@@ -369,10 +417,11 @@ test "x86_64 R_X86_64_32S accepts negative" {
     var buf: [8]u8 = undefined;
     @memset(&buf, 0);
 
+    // True 64-bit representation of -2 (fits in signed 32).
     _ = try apply(.x86_64, &buf, .{
         .offset = 0,
         .type_id = X86_64.@"32S",
-        .symbol_address = 0xFFFF_FFFE,
+        .symbol_address = @as(u64, @bitCast(@as(i64, -2))),
         .addend = 0,
         .place_address = 0,
     });
@@ -464,7 +513,7 @@ test "aarch64 ABS64" {
 test "aarch64 ADR_PREL_PG_HI21 patches ADRP" {
     // ADRP x0, #0  → 0x90000000
     var buf = [_]u8{ 0x00, 0x00, 0x00, 0x90 };
-    // S = 0x5000, P = 0x1000 → page delta = 0x4000
+    // S = 0x5000, P = 0x1000 → page delta = 0x4000 = 4 pages
     _ = try apply(.aarch64, &buf, .{
         .offset = 0,
         .type_id = AArch64.ADR_PREL_PG_HI21,
@@ -474,8 +523,13 @@ test "aarch64 ADR_PREL_PG_HI21 patches ADRP" {
     });
 
     const inst = std.mem.readInt(u32, &buf, .little);
-    // Opcode nibble should still be ADRP (0x9).
-    try std.testing.expectEqual(@as(u32, 0x9), (inst >> 24) & 0x1F);
+    // ADRP opcode: bit 31 set, bits [28:24] == 10000.
+    try std.testing.expectEqual(@as(u32, 1), (inst >> 31) & 1);
+    try std.testing.expectEqual(@as(u32, 0x10), (inst >> 24) & 0x1F);
+    // immlo (bits 30:29) should be 0 for 4 pages (4 & 3 == 0).
+    try std.testing.expectEqual(@as(u32, 0), (inst >> 29) & 0x3);
+    // immhi (bits 23:5) should be 1 (4 >> 2).
+    try std.testing.expectEqual(@as(u32, 1), (inst >> 5) & 0x7FFFF);
 }
 
 test "aarch64 ADD_ABS_LO12_NC patches immediate" {
@@ -567,4 +621,295 @@ test "page alignment" {
     try std.testing.expectEqual(@as(i64, 0x1000), page(0x1234));
     try std.testing.expectEqual(@as(i64, 0x2000), page(0x2FFF));
     try std.testing.expectEqual(@as(i64, 0), page(0x0FFF));
+}
+
+// === Additional Phase 8 tests (40) ===
+
+test "resolve finds symbol address" {
+    const syms = [_]SymbolAddr{.{ .name = "main", .address = 0x401000 }};
+    const r = try resolve(.{
+        .offset = 0,
+        .type_id = X86_64.@"64",
+        .symbol_name = "main",
+        .addend = 0,
+        .place_address = 0x400000,
+    }, &syms);
+    try std.testing.expectEqual(@as(u64, 0x401000), r.symbol_address);
+}
+
+test "resolve missing symbol" {
+    const syms = [_]SymbolAddr{.{ .name = "foo", .address = 1 }};
+    const result = resolve(.{
+        .offset = 0,
+        .type_id = X86_64.@"64",
+        .symbol_name = "bar",
+        .addend = 0,
+        .place_address = 0,
+    }, &syms);
+    try std.testing.expectError(error.UnresolvedSymbol, result);
+}
+
+test "resolveAndApply patches buffer" {
+    var buf: [16]u8 = undefined;
+    @memset(&buf, 0);
+    const syms = [_]SymbolAddr{.{ .name = "val", .address = 0x42 }};
+    const pending = [_]PendingReloc{.{
+        .offset = 0,
+        .type_id = X86_64.@"64",
+        .symbol_name = "val",
+        .addend = 1,
+        .place_address = 0,
+    }};
+    const n = try resolveAndApply(.x86_64, &buf, &pending, &syms);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(u64, 0x43), std.mem.readInt(u64, buf[0..8], .little));
+}
+
+test "x86_64 64 with negative addend" {
+    var buf: [8]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.@"64", .symbol_address = 100, .addend = -10, .place_address = 0 });
+    try std.testing.expectEqual(@as(u64, 90), std.mem.readInt(u64, buf[0..8], .little));
+}
+
+test "x86_64 PC32 negative displacement" {
+    var buf: [4]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.PC32, .symbol_address = 0x1000, .addend = 0, .place_address = 0x2000 });
+    const got = std.mem.readInt(i32, &buf, .little);
+    try std.testing.expectEqual(@as(i32, -0x1000), got);
+}
+
+test "x86_64 PC32 max positive" {
+    var buf: [4]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.PC32, .symbol_address = 0x7FFFFFFF, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u32, 0x7FFFFFFF), std.mem.readInt(u32, &buf, .little));
+}
+
+test "x86_64 PC32 min negative" {
+    var buf: [4]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.PC32, .symbol_address = 0, .addend = 0, .place_address = 0x80000000 });
+    const got = std.mem.readInt(i32, &buf, .little);
+    try std.testing.expectEqual(@as(i32, -0x80000000), got);
+}
+
+test "x86_64 32S overflow high" {
+    var buf: [4]u8 = undefined;
+    const result = apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.@"32S", .symbol_address = 0x80000000, .addend = 0, .place_address = 0 });
+    try std.testing.expectError(error.Overflow, result);
+}
+
+test "x86_64 32 accepts zero" {
+    var buf: [4]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.@"32", .symbol_address = 0, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, &buf, .little));
+}
+
+test "x86_64 32 rejects negative" {
+    var buf: [4]u8 = undefined;
+    const result = apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.@"32", .symbol_address = 0, .addend = -1, .place_address = 0 });
+    try std.testing.expectError(error.Overflow, result);
+}
+
+test "x86_64 write at non-zero offset" {
+    var buf: [16]u8 = undefined;
+    @memset(&buf, 0xFF);
+    _ = try apply(.x86_64, &buf, .{ .offset = 4, .type_id = X86_64.@"32", .symbol_address = 0xABCD, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u8, 0xFF), buf[0]);
+    try std.testing.expectEqual(@as(u32, 0xABCD), std.mem.readInt(u32, buf[4..8], .little));
+}
+
+test "x86_64 PC64 large positive" {
+    var buf: [8]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.PC64, .symbol_address = 0xFFFF_FFFF_FFFF_0000, .addend = 0, .place_address = 0x1000 });
+    const got = std.mem.readInt(u64, &buf, .little);
+    try std.testing.expect(got > 0xFFFF_0000);
+}
+
+test "aarch64 ABS64 with addend" {
+    var buf: [8]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.ABS64, .symbol_address = 0x1000, .addend = -8, .place_address = 0 });
+    try std.testing.expectEqual(@as(u64, 0xFF8), std.mem.readInt(u64, &buf, .little));
+}
+
+test "aarch64 ADD lo12 wraps modulo 4096" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x91 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.ADD_ABS_LO12_NC, .symbol_address = 0x1FFF, .addend = 0, .place_address = 0 });
+    const imm12 = (std.mem.readInt(u32, &buf, .little) >> 10) & 0xFFF;
+    try std.testing.expectEqual(@as(u32, 0xFFF), imm12);
+}
+
+test "aarch64 JUMP26 zero delta" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x14 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.JUMP26, .symbol_address = 0x2000, .addend = 0, .place_address = 0x2000 });
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, &buf, .little) & 0x03FFFFFF);
+}
+
+test "aarch64 CALL26 positive" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x94 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.CALL26, .symbol_address = 0x1020, .addend = 0, .place_address = 0x1000 });
+    try std.testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, &buf, .little) & 0x03FFFFFF);
+}
+
+test "aarch64 JUMP26 overflow large" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x14 };
+    const result = apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.JUMP26, .symbol_address = 0x1000_0000, .addend = 0, .place_address = 0 });
+    try std.testing.expectError(error.Overflow, result);
+}
+
+test "aarch64 ADRP same page is zero" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x90 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.ADR_PREL_PG_HI21, .symbol_address = 0x1ABC, .addend = 0, .place_address = 0x1000 });
+    // Page delta 0 → immediate bits stay 0.
+    const inst = std.mem.readInt(u32, &buf, .little);
+    try std.testing.expectEqual(@as(u32, 0), (inst >> 5) & 0x7FFFF);
+}
+
+test "aarch64 NONE preserves bytes" {
+    var buf = [_]u8{ 1, 2, 3, 4 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.NONE, .symbol_address = 99, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u8, 1), buf[0]);
+}
+
+test "aarch64 unsupported" {
+    var buf: [8]u8 = undefined;
+    const result = apply(.aarch64, &buf, .{ .offset = 0, .type_id = 300, .symbol_address = 0, .addend = 0, .place_address = 0 });
+    try std.testing.expectError(error.UnsupportedType, result);
+}
+
+test "applyAll stops on first error" {
+    var buf: [16]u8 = undefined;
+    @memset(&buf, 0);
+    const relocs = [_]Reloc{
+        .{ .offset = 0, .type_id = X86_64.@"64", .symbol_address = 1, .addend = 0, .place_address = 0 },
+        .{ .offset = 8, .type_id = 99, .symbol_address = 0, .addend = 0, .place_address = 0 },
+    };
+    const result = applyAll(.x86_64, &buf, &relocs);
+    try std.testing.expectError(error.UnsupportedType, result);
+}
+
+test "typeName all x86_64" {
+    try std.testing.expectEqualStrings("NONE", typeName(.x86_64, 0));
+    try std.testing.expectEqualStrings("64", typeName(.x86_64, 1));
+    try std.testing.expectEqualStrings("32", typeName(.x86_64, 10));
+    try std.testing.expectEqualStrings("32S", typeName(.x86_64, 11));
+    try std.testing.expectEqualStrings("PC64", typeName(.x86_64, 24));
+}
+
+test "typeName all aarch64" {
+    try std.testing.expectEqualStrings("ABS64", typeName(.aarch64, 257));
+    try std.testing.expectEqualStrings("ADD_ABS_LO12_NC", typeName(.aarch64, 277));
+    try std.testing.expectEqualStrings("JUMP26", typeName(.aarch64, 282));
+    try std.testing.expectEqualStrings("CALL26", typeName(.aarch64, 283));
+}
+
+test "checkSigned 8-bit" {
+    try checkSigned(127, 8);
+    try checkSigned(-128, 8);
+    try std.testing.expectError(error.Overflow, checkSigned(128, 8));
+}
+
+test "checkSigned 16-bit" {
+    try checkSigned(32767, 16);
+    try std.testing.expectError(error.Overflow, checkSigned(32768, 16));
+}
+
+test "checkSigned 26-bit" {
+    try checkSigned((1 << 25) - 1, 26);
+    try std.testing.expectError(error.Overflow, checkSigned(1 << 25, 26));
+}
+
+test "page of negative" {
+    try std.testing.expectEqual(@as(i64, -0x1000), page(-1));
+}
+
+test "resolve empty symbol list" {
+    const result = resolve(.{ .offset = 0, .type_id = 1, .symbol_name = "x", .addend = 0, .place_address = 0 }, &.{});
+    try std.testing.expectError(error.UnresolvedSymbol, result);
+}
+
+test "resolve picks correct among many" {
+    const syms = [_]SymbolAddr{
+        .{ .name = "a", .address = 1 },
+        .{ .name = "b", .address = 2 },
+        .{ .name = "c", .address = 3 },
+    };
+    const r = try resolve(.{ .offset = 0, .type_id = 1, .symbol_name = "b", .addend = 0, .place_address = 0 }, &syms);
+    try std.testing.expectEqual(@as(u64, 2), r.symbol_address);
+}
+
+test "x86_64 64 preserves surrounding bytes" {
+    var buf = [_]u8{ 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0x55, 0x66 };
+    _ = try apply(.x86_64, &buf, .{ .offset = 4, .type_id = X86_64.@"64", .symbol_address = 0x01020304, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u8, 0x11), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x55), buf[12]);
+}
+
+test "aarch64 ADD preserves opcode" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x91 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.ADD_ABS_LO12_NC, .symbol_address = 1, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u8, 0x91), buf[3]);
+}
+
+test "aarch64 JUMP26 preserves opcode" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x14 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.JUMP26, .symbol_address = 0x1004, .addend = 0, .place_address = 0x1000 });
+    try std.testing.expectEqual(@as(u8, 0x14), buf[3]);
+}
+
+test "multiple pending resolveAndApply" {
+    var buf: [32]u8 = undefined;
+    @memset(&buf, 0);
+    const syms = [_]SymbolAddr{
+        .{ .name = "a", .address = 10 },
+        .{ .name = "b", .address = 20 },
+    };
+    const pending = [_]PendingReloc{
+        .{ .offset = 0, .type_id = X86_64.@"64", .symbol_name = "a", .addend = 0, .place_address = 0 },
+        .{ .offset = 8, .type_id = X86_64.@"64", .symbol_name = "b", .addend = 5, .place_address = 0 },
+    };
+    const n = try resolveAndApply(.x86_64, &buf, &pending, &syms);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(u64, 10), std.mem.readInt(u64, buf[0..8], .little));
+    try std.testing.expectEqual(@as(u64, 25), std.mem.readInt(u64, buf[8..16], .little));
+}
+
+test "x86_64 PC32 with addend" {
+    var buf: [4]u8 = undefined;
+    @memset(&buf, 0);
+    _ = try apply(.x86_64, &buf, .{ .offset = 0, .type_id = X86_64.PC32, .symbol_address = 0x2000, .addend = 4, .place_address = 0x1000 });
+    try std.testing.expectEqual(@as(u32, 0x1004), std.mem.readInt(u32, &buf, .little));
+}
+
+test "arch name" {
+    try std.testing.expectEqualStrings("x86_64", Arch.x86_64.name());
+    try std.testing.expectEqualStrings("aarch64", Arch.aarch64.name());
+}
+
+test "Applied fields populated" {
+    var buf: [8]u8 = undefined;
+    @memset(&buf, 0);
+    const a = try apply(.x86_64, &buf, .{ .offset = 2, .type_id = X86_64.@"32", .symbol_address = 7, .addend = 0, .place_address = 0 });
+    try std.testing.expectEqual(@as(u64, 2), a.offset);
+    try std.testing.expectEqual(@as(u32, 10), a.type_id);
+    try std.testing.expectEqual(@as(u8, 4), a.bytes_written);
+}
+
+test "truncated at offset near end" {
+    var buf: [6]u8 = undefined;
+    const result = apply(.x86_64, &buf, .{ .offset = 4, .type_id = X86_64.@"32", .symbol_address = 1, .addend = 0, .place_address = 0 });
+    try std.testing.expectError(error.Truncated, result);
+}
+
+test "aarch64 ADRP one page forward" {
+    var buf = [_]u8{ 0x00, 0x00, 0x00, 0x90 };
+    _ = try apply(.aarch64, &buf, .{ .offset = 0, .type_id = AArch64.ADR_PREL_PG_HI21, .symbol_address = 0x2000, .addend = 0, .place_address = 0x1000 });
+    const inst = std.mem.readInt(u32, &buf, .little);
+    // immlo should be 1 (page delta = 1).
+    try std.testing.expectEqual(@as(u32, 1), (inst >> 29) & 0x3);
 }
