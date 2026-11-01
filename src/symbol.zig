@@ -1,9 +1,9 @@
-//! Phase 6.1: Global Symbol Table Creation.
+//! Phase 6.1–6.3: Global Symbol Table, Binding Rules, and Duplicate Detection.
 //!
 //! Provides a format-agnostic symbol representation and a central hash map
 //! that stores every defined and undefined symbol collected from input
-//! objects and archives. Later phases (binding rules, duplicate detection,
-//! visibility) build on top of this table.
+//! objects and archives. Strong definitions override weak ones; multiple
+//! strong definitions for the same symbol are reported as errors.
 
 const std = @import("std");
 const elf = @import("elf.zig");
@@ -26,6 +26,11 @@ pub const Binding = enum {
             .weak => "weak",
         };
     }
+
+    /// Return true if this binding is strong (non-weak global).
+    pub fn isStrong(self: Binding) bool {
+        return self == .global;
+    }
 };
 
 /// High-level kind of a symbol after normalization.
@@ -46,6 +51,11 @@ pub const Kind = enum {
             .absolute => "absolute",
             .common => "common",
         };
+    }
+
+    /// Return true if this kind represents a definition (not a pure reference).
+    pub fn isDefinition(self: Kind) bool {
+        return self != .undefined;
     }
 };
 
@@ -69,11 +79,19 @@ pub const Symbol = struct {
     visibility: elf.SymbolVisibility = .default,
 
     pub fn isDefined(self: Symbol) bool {
-        return self.kind == .defined or self.kind == .absolute or self.kind == .common;
+        return self.kind.isDefinition();
     }
 
     pub fn isUndefined(self: Symbol) bool {
         return self.kind == .undefined;
+    }
+
+    pub fn isStrong(self: Symbol) bool {
+        return self.binding.isStrong() and self.isDefined();
+    }
+
+    pub fn isWeak(self: Symbol) bool {
+        return self.binding == .weak and self.isDefined();
     }
 };
 
@@ -81,12 +99,14 @@ pub const Symbol = struct {
 pub const Error = error{
     OutOfMemory,
     EmptyName,
+    /// Two or more strong definitions exist for the same symbol.
+    DuplicateStrongDefinition,
 };
 
 /// Central hash map of all symbols seen so far.
 ///
-/// Phase 6.1 only stores symbols. Conflict resolution (weak vs strong,
-/// duplicate strong definitions, etc.) is handled in later sub-phases.
+/// Implements Phase 6.2 binding rules (strong overrides weak) and
+/// Phase 6.3 duplicate detection (error on multiple strong definitions).
 pub const SymbolTable = struct {
     /// Maps symbol name → Symbol. Names are owned by this table.
     map: std.StringHashMapUnmanaged(Symbol),
@@ -118,21 +138,57 @@ pub const SymbolTable = struct {
         return self.map.get(name);
     }
 
-    /// Insert or replace a symbol.
+    /// Insert a symbol, applying binding rules.
     ///
-    /// The name is duplicated so the table owns it. If a symbol with the
-    /// same name already exists it is overwritten (Phase 6.2 will refine
-    /// this behaviour).
+    /// Resolution order:
+    /// - Undefined is replaced by any definition.
+    /// - Weak definition is replaced by a strong definition.
+    /// - Strong definition is kept; a second strong definition returns
+    ///   `error.DuplicateStrongDefinition`.
+    /// - A second weak definition is ignored (first one wins).
+    /// - Local symbols are stored but do not participate in strong/weak
+    ///   conflict detection with global symbols of the same name.
     pub fn add(self: *SymbolTable, symbol: Symbol) Error!void {
         if (symbol.name.len == 0) return error.EmptyName;
+
+        if (self.map.getPtr(symbol.name)) |existing| {
+            // Local symbols never conflict with anything already present.
+            if (symbol.binding == .local or existing.binding == .local) {
+                // Prefer the non-local symbol if one exists.
+                if (existing.binding == .local and symbol.binding != .local) {
+                    // Replace local with global/weak.
+                } else {
+                    return; // keep existing
+                }
+            } else {
+                const existing_is_def = existing.isDefined();
+                const new_is_def = symbol.isDefined();
+                const existing_strong = existing.isStrong();
+                const new_strong = symbol.isStrong();
+
+                if (existing_strong and new_strong) {
+                    return error.DuplicateStrongDefinition;
+                }
+
+                // Strong definition always wins over weak or undefined.
+                if (new_strong and !existing_strong) {
+                    // fall through to replace
+                } else if (existing_strong) {
+                    return; // keep strong
+                } else if (existing_is_def and existing.binding == .weak and new_is_def and symbol.binding == .weak) {
+                    return; // first weak wins
+                } else if (!new_is_def) {
+                    return; // pure undefined does not override a definition
+                }
+                // else: new definition replaces existing (e.g. def over undef, strong over weak)
+            }
+        }
 
         const owned_name = try self.allocator.dupe(u8, symbol.name);
         errdefer self.allocator.free(owned_name);
 
         const gop = try self.map.getOrPut(self.allocator, owned_name);
         if (gop.found_existing) {
-            // Free the previous owned key; the map still holds the old key pointer
-            // until we replace it.
             self.allocator.free(gop.key_ptr.*);
             gop.key_ptr.* = owned_name;
         }
@@ -161,6 +217,16 @@ pub const SymbolTable = struct {
     /// Return an iterator over all stored symbols.
     pub fn iterator(self: *const SymbolTable) std.StringHashMapUnmanaged(Symbol).Iterator {
         return self.map.iterator();
+    }
+
+    /// Return the number of currently undefined symbols.
+    pub fn undefinedCount(self: *const SymbolTable) usize {
+        var n: usize = 0;
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.isUndefined()) n += 1;
+        }
+        return n;
     }
 
     // === Format-specific ingestion helpers ===
@@ -318,7 +384,7 @@ test "symbol table init, add, get, and count" {
     try std.testing.expect(table.get("missing") == null);
 }
 
-test "symbol table overwrites existing name" {
+test "strong definition overrides weak definition" {
     var table = SymbolTable.init(std.testing.allocator);
     defer table.deinit();
 
@@ -327,6 +393,7 @@ test "symbol table overwrites existing name" {
         .binding = .weak,
         .kind = .defined,
         .value = 1,
+        .file_index = 0,
     });
 
     try table.add(.{
@@ -334,12 +401,118 @@ test "symbol table overwrites existing name" {
         .binding = .global,
         .kind = .defined,
         .value = 42,
+        .file_index = 1,
     });
 
     try std.testing.expectEqual(@as(usize, 1), table.count());
     const sym = table.get("foo") orelse return error.TestExpectedSymbol;
     try std.testing.expectEqual(Binding.global, sym.binding);
     try std.testing.expectEqual(@as(u64, 42), sym.value);
+    try std.testing.expectEqual(@as(u32, 1), sym.file_index);
+}
+
+test "weak definition does not override strong definition" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "bar",
+        .binding = .global,
+        .kind = .defined,
+        .value = 100,
+        .file_index = 0,
+    });
+
+    try table.add(.{
+        .name = "bar",
+        .binding = .weak,
+        .kind = .defined,
+        .value = 999,
+        .file_index = 1,
+    });
+
+    const sym = table.get("bar") orelse return error.TestExpectedSymbol;
+    try std.testing.expectEqual(Binding.global, sym.binding);
+    try std.testing.expectEqual(@as(u64, 100), sym.value);
+    try std.testing.expectEqual(@as(u32, 0), sym.file_index);
+}
+
+test "definition replaces undefined" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "puts",
+        .binding = .global,
+        .kind = .undefined,
+        .file_index = 0,
+    });
+
+    try table.add(.{
+        .name = "puts",
+        .binding = .global,
+        .kind = .defined,
+        .value = 0x4000,
+        .file_index = 1,
+    });
+
+    const sym = table.get("puts") orelse return error.TestExpectedSymbol;
+    try std.testing.expect(sym.isDefined());
+    try std.testing.expectEqual(@as(u64, 0x4000), sym.value);
+    try std.testing.expectEqual(@as(usize, 0), table.undefinedCount());
+}
+
+test "duplicate strong definitions are rejected" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "main",
+        .binding = .global,
+        .kind = .defined,
+        .value = 0x1000,
+        .file_index = 0,
+    });
+
+    const result = table.add(.{
+        .name = "main",
+        .binding = .global,
+        .kind = .defined,
+        .value = 0x2000,
+        .file_index = 1,
+    });
+
+    try std.testing.expectError(error.DuplicateStrongDefinition, result);
+
+    // Original strong definition must still be present.
+    const sym = table.get("main") orelse return error.TestExpectedSymbol;
+    try std.testing.expectEqual(@as(u64, 0x1000), sym.value);
+    try std.testing.expectEqual(@as(u32, 0), sym.file_index);
+}
+
+test "second weak definition is ignored" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{
+        .name = "weakfn",
+        .binding = .weak,
+        .kind = .defined,
+        .value = 10,
+        .file_index = 0,
+    });
+
+    try table.add(.{
+        .name = "weakfn",
+        .binding = .weak,
+        .kind = .defined,
+        .value = 20,
+        .file_index = 1,
+    });
+
+    const sym = table.get("weakfn") orelse return error.TestExpectedSymbol;
+    try std.testing.expectEqual(@as(u64, 10), sym.value);
+    try std.testing.expectEqual(@as(u32, 0), sym.file_index);
 }
 
 test "symbol table rejects empty name" {
@@ -419,4 +592,15 @@ test "iterator visits every symbol" {
         seen += 1;
     }
     try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "undefinedCount tracks unresolved symbols" {
+    var table = SymbolTable.init(std.testing.allocator);
+    defer table.deinit();
+
+    try table.add(.{ .name = "main", .binding = .global, .kind = .defined });
+    try table.add(.{ .name = "printf", .binding = .global, .kind = .undefined });
+    try table.add(.{ .name = "malloc", .binding = .global, .kind = .undefined });
+
+    try std.testing.expectEqual(@as(usize, 2), table.undefinedCount());
 }

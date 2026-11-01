@@ -37,9 +37,9 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 - [x] **5.4 Thin Archives:** Support thin archives by reading file paths and loading external objects directly.
 
 ## Phase 6: Global Symbol Resolution
-- [ ] **6.1 Symbol Table Creation:** Build a central hash map to store all defined and undefined symbols.
-- [ ] **6.2 Binding Rules:** Resolve conflicts between weak symbols and strong symbols properly.
-- [ ] **6.3 Duplicate Detection:** Report clear errors when multiple strong definitions exist for the same symbol.
+- [x] **6.1 Symbol Table Creation:** Build a central hash map to store all defined and undefined symbols.
+- [x] **6.2 Binding Rules:** Resolve conflicts between weak symbols and strong symbols properly.
+- [x] **6.3 Duplicate Detection:** Report clear errors when multiple strong definitions exist for the same symbol.
 - [ ] **6.4 Undefined Symbol Tracking:** Track missing symbols and ensure every needed symbol is found before linking stops.
 - [ ] **6.5 Visibility Rules:** Handle local, hidden, and default visibility rules.
 

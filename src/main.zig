@@ -66,6 +66,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Process input files
     std.debug.print("  Input Files ({d}):\n", .{options.input_files.items.len});
+
+    // Phase 6: Global symbol resolution
+    var symtab = sibl.SymbolTable.init(arena);
+    defer symtab.deinit();
+
+    var file_index: u32 = 0;
     for (options.input_files.items) |file_path| {
         var mapped = sibl.MappedFile.open(io, file_path) catch |err| {
             std.debug.print("sibl: error: could not open '{s}': {s}\n", .{ file_path, @errorName(err) });
@@ -77,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
         if (mapped.data.len >= 4 and std.mem.eql(u8, mapped.data[0..4], &sibl.elf.MAGIC)) {
             const elf_hdr = sibl.elf.Header.parse(mapped.data) catch |err| {
                 std.debug.print("sibl: error: failed to parse ELF header for '{s}': {s}\n", .{ file_path, @errorName(err) });
+                file_index += 1;
                 continue;
             };
 
@@ -105,6 +112,29 @@ pub fn main(init: std.process.Init) !void {
                     if (sh.isWritable()) "W" else "",
                     if (sh.isExecutable()) "X" else "",
                 });
+
+                // Phase 6: ingest symbols from .symtab / .dynsym
+                if (sh.sh_type == .symtab or sh.sh_type == .dynsym) {
+                    const strtab_idx = sh.link;
+                    const strtab_bytes = if (strtab_idx < sections.len)
+                        (sections[strtab_idx].getData(mapped.data) catch &.{})
+                    else
+                        &.{};
+
+                    const symbols = sh.parseAllSymbols(arena, mapped.data, elf_hdr.class, elf_hdr.endian) catch continue;
+                    for (symbols) |sym| {
+                        symtab.addElf(sym, strtab_bytes, file_index) catch |err| {
+                            if (err == error.DuplicateStrongDefinition) {
+                                const sym_name = sym.getName(strtab_bytes) catch "<unknown>";
+                                std.debug.print("sibl: error: duplicate strong definition of '{s}' (file {s})\n", .{
+                                    sym_name,
+                                    file_path,
+                                });
+                                std.process.exit(1);
+                            }
+                        };
+                    }
+                }
             }
         }
         // 2. Check if file is PE / COFF format
@@ -160,6 +190,23 @@ pub fn main(init: std.process.Init) !void {
                         csh.getAlignment(),
                         rel_count,
                     });
+                }
+            }
+
+            // Phase 6: ingest COFF symbols
+            if (coff_hdr.symbol_count > 0) {
+                const symbols = coff_hdr.parseAllSymbols(arena, mapped.data) catch &.{};
+                for (symbols) |sym| {
+                    symtab.addCoff(sym, strtab_bytes, file_index) catch |err| {
+                        if (err == error.DuplicateStrongDefinition) {
+                            const sym_name = sym.getName(strtab_bytes) catch "<unknown>";
+                            std.debug.print("sibl: error: duplicate strong definition of '{s}' (file {s})\n", .{
+                                sym_name,
+                                file_path,
+                            });
+                            std.process.exit(1);
+                        }
+                    };
                 }
             }
         }
@@ -396,5 +443,29 @@ pub fn main(init: std.process.Init) !void {
         } else {
             std.debug.print("    - {s} ({d} bytes mapped, non-binary/unknown)\n", .{ file_path, mapped.size });
         }
+
+        file_index += 1;
+    }
+
+    // Phase 6: print resolved symbol table
+    std.debug.print("\n  Resolved Symbols ({d} total, {d} undefined):\n", .{
+        symtab.count(),
+        symtab.undefinedCount(),
+    });
+    var it = symtab.iterator();
+    var printed: usize = 0;
+    while (it.next()) |entry| : (printed += 1) {
+        if (printed >= 32) {
+            std.debug.print("    ... and {d} more symbols\n", .{symtab.count() - printed});
+            break;
+        }
+        const sym = entry.value_ptr.*;
+        std.debug.print("    {s:<24} {s:<8} {s:<10} value=0x{x:<8} file={d}\n", .{
+            sym.name,
+            sym.binding.name(),
+            sym.kind.name(),
+            sym.value,
+            sym.file_index,
+        });
     }
 }
