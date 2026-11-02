@@ -24,6 +24,11 @@ pub const InputSection = struct {
     is_nobits: bool,
     /// Index of the input file that contributed this section.
     file_index: u32,
+    /// Index of this section inside the originating object (0-based for ELF
+    /// and Mach-O, 1-based for COFF section numbers). Lets the entry resolver
+    /// (Phase 9.1) map a symbol back to the member it was defined in.
+    /// 0 means "unknown / not tracked".
+    section_index: u32 = 0,
 };
 
 /// An output section that collects one or more input sections.

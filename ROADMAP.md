@@ -50,14 +50,14 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 - [x] **7.4 Size Accounting:** Compute the final virtual memory size and raw file size for each segment.
 
 ## Phase 8: Relocation Engine
-- [ ] **8.1 Relocation Resolver:** Match relocation records to final resolved symbol addresses.
-- [ ] **8.2 x86_64 Relocations:** Implement PC-relative (like `R_X86_64_PC32`) and absolute relocations (`R_X86_64_64`).
-- [ ] **8.3 AArch64 Relocations:** Implement branch offsets and page-based relocations (like `ADR_PREL_PG_HI21`).
-- [ ] **8.4 Range Checking:** Check for 32-bit overflow errors on relative jumps and report error details.
-- [ ] **8.5 In-Place Patching:** Write the computed target addresses directly into the output byte buffer.
+- [x] **8.1 Relocation Resolver:** Match relocation records to final resolved symbol addresses.
+- [x] **8.2 x86_64 Relocations:** Implement PC-relative (like `R_X86_64_PC32`) and absolute relocations (`R_X86_64_64`).
+- [x] **8.3 AArch64 Relocations:** Implement branch offsets and page-based relocations (like `ADR_PREL_PG_HI21`).
+- [x] **8.4 Range Checking:** Check for 32-bit overflow errors on relative jumps and report error details.
+- [x] **8.5 In-Place Patching:** Write the computed target addresses directly into the output byte buffer.
 
 ## Phase 9: Linker Script and Entry Rules
-- [ ] **9.1 Entry Point Setup:** Find and set the program entry point (like `_start` or `mainCRTStartup`).
+- [x] **9.1 Entry Point Setup:** Find and set the program entry point (like `_start` or `mainCRTStartup`).
 - [ ] **9.2 Custom Section Rules:** Support basic placement rules for embedded or custom memory maps.
 - [ ] **9.3 Symbol Assignment:** Allow defining basic symbols from CLI flags (like `--defsym`).
 - [ ] **9.4 Default Layout Templates:** Provide built-in standard layouts for Linux, Windows, macOS, and bare-metal targets.

@@ -89,6 +89,11 @@ pub const layout = @import("layout.zig");
 /// ranges, and patches values in place.
 pub const reloc = @import("reloc.zig");
 
+/// Entry point resolution (Phase 9.1).
+/// Finds the program entry symbol (`_start` by default, `-e` to override) and
+/// computes its final virtual address from the symbol table and layout.
+pub const entry = @import("entry.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -335,6 +340,20 @@ pub const SymbolAddr = reloc.SymbolAddr;
 /// Human-readable relocation type name.
 pub const relocTypeName = reloc.typeName;
 
+// Entry point types (Phase 9.1)
+/// A resolved program entry point.
+pub const Entry = entry.Entry;
+/// Errors that can occur while resolving the entry point.
+pub const EntryError = entry.Error;
+/// Entry symbol candidates tried when no explicit `-e` was given.
+pub const defaultEntryCandidates = entry.default_candidates;
+/// Resolve an entry symbol name to a final virtual address.
+pub const resolveEntry = entry.resolve;
+/// Resolve the first defined symbol from a candidate list.
+pub const resolveEntryCandidates = entry.resolveCandidates;
+/// Compute the final virtual address of a defined symbol.
+pub const entrySymbolAddress = entry.symbolAddress;
+
 // === Test Suite Runner ===
 
 test {
@@ -350,4 +369,5 @@ test {
     _ = symbol;
     _ = layout;
     _ = reloc;
+    _ = entry;
 }

@@ -18,7 +18,8 @@ sibl parses ELF, PE/COFF, Mach-O, and static archives with a zero-copy design, r
 - Per-segment file and memory size accounting (`p_filesz` / `p_memsz`)
 - Relocation engine for x86_64 and AArch64 (absolute, PC-relative, ADRP, branch)
 - Range checking and in-place patching
-- Unit-tested parsing, resolution, layout, and relocation
+- Entry point resolution: `-e` / `--entry` (default `_start`) resolved to a final virtual address
+- Unit-tested parsing, resolution, layout, relocation, and entry resolution
 
 ## Building
 
@@ -40,7 +41,16 @@ zig build-obj hello.zig -femit-bin=hello.o
 ./zig-out/bin/sibl hello.o
 ```
 
-Expected output includes resolved symbols, a section layout (virtual addresses from `0x400000`), and a segment list with `filesz` / `memsz`.
+Expected output includes resolved symbols, a section layout (virtual addresses from `0x400000`), a segment list with `filesz` / `memsz`, and the resolved entry point:
+
+```
+  Entry Point '_start':
+    Address       : 0x401000
+    Section       : .text
+    Executable    : true
+```
+
+Override the entry symbol with `-e <name>` / `--entry <name>`.
 
 ## Using sibl as a Library
 
@@ -54,6 +64,11 @@ defer table.deinit();
 
 var layout = sibl.Layout.init(allocator, 0x400000, 4096);
 defer layout.deinit();
+
+// ... add symbols and sections ...
+layout.computeAddresses();
+const ep = sibl.resolveEntry(&table, &layout, "_start");
+// ep.address is the final virtual address of the entry point
 ```
 
 Public types are re-exported from `src/root.zig`. HTML docs:
@@ -78,6 +93,7 @@ src/
 ├── symbol.zig    Phase 6    — global symbol table and resolution
 ├── layout.zig    Phase 7    — section grouping, segments, size accounting
 ├── reloc.zig     Phase 8    — relocation engine (x86_64, AArch64)
+├── entry.zig     Phase 9.1  — entry point resolution
 ├── root.zig      Public re-exports
 └── main.zig      Linker executable entry point
 ```
@@ -95,4 +111,6 @@ See `ROADMAP.md` for the full phase plan and what is still ahead.
 
 ## Status
 
-Phases 1–8 are implemented and tested. Phase 9 (entry point and linker script rules) is next. Emission of a runnable binary is Phase 13.
+Phases 1–8 and Phase 9.1 (entry point setup) are implemented and tested.
+Phase 9 continues with section placement rules and `--defsym` support. Binary
+emission of a runnable binary is Phase 13.

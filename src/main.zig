@@ -2,8 +2,9 @@
 //!
 //! Uses Zig 0.17 juicy main (`std.process.Init`). Reads command-line arguments,
 //! detects the target, maps input files, resolves symbols (Phase 6), groups
-//! sections and builds segments (Phase 7), and reports the layout. Relocation
-//! application (Phase 8) is available as a library; binary emission is later.
+//! sections and builds segments (Phase 7), reports the layout, and resolves
+//! the program entry point (Phase 9.1). Relocation application (Phase 8) is
+//! available as a library; binary emission is later.
 
 const std = @import("std");
 const sibl = @import("sibl");
@@ -153,6 +154,7 @@ pub fn main(init: std.process.Init) !void {
                         .is_executable = sh.isExecutable(),
                         .is_nobits = sh.sh_type == .nobits,
                         .file_index = file_index,
+                        .section_index = @intCast(idx),
                     }) catch |err| {
                         std.debug.print("sibl: error: layout failed for '{s}': {s}\n", .{ name, @errorName(err) });
                         std.process.exit(1);
@@ -565,6 +567,29 @@ pub fn main(init: std.process.Init) !void {
                 }
                 std.process.exit(1);
             }
+        }
+    }
+
+    // Phase 9.1: resolve the program entry point to a final address
+    if (sibl.entry.resolve(&symtab, &layout, final_entry)) |ep| {
+        std.debug.print("\n  Entry Point '{s}':\n", .{ep.name});
+        std.debug.print("    Address       : 0x{x}\n", .{ep.address});
+        std.debug.print("    Section       : {s}\n", .{ep.section_name});
+        std.debug.print("    Executable    : {}\n", .{ep.is_executable});
+        if (!ep.is_executable) {
+            std.debug.print("    Warning       : entry symbol is in a non-executable section\n", .{});
+        }
+    } else |err| {
+        if (options.is_shared) {
+            // Shared libraries run their init code early; a missing entry
+            // only disables the optional DT_INIT-equivalent and is not fatal.
+            std.debug.print("\n  Entry Point   : '{s}' unresolved ({s}) - allowed in shared mode\n", .{
+                final_entry,
+                @errorName(err),
+            });
+        } else {
+            std.debug.print("sibl: error: cannot resolve entry point '{s}': {s}\n", .{ final_entry, @errorName(err) });
+            std.process.exit(1);
         }
     }
 }
