@@ -69,6 +69,51 @@ pub fn main(init: std.process.Init) !void {
     // Process input files
     std.debug.print("  Input Files ({d}):\n", .{options.input_files.items.len});
 
+    // Phase 9.2: build custom section placement rules
+    var placement_rules = sibl.rules.RuleSet.init(arena);
+    defer placement_rules.deinit();
+
+    for (options.region_specs.items) |spec| {
+        placement_rules.addRegionSpec(spec) catch |err| {
+            std.debug.print("sibl: error: invalid --region spec '{s}': {s}\n", .{ spec, @errorName(err) });
+            std.process.exit(1);
+        };
+    }
+    for (options.place_specs.items) |spec| {
+        placement_rules.addMoveSpec(spec) catch |err| {
+            std.debug.print("sibl: error: invalid --place spec '{s}': {s}\n", .{ spec, @errorName(err) });
+            std.process.exit(1);
+        };
+    }
+    for (options.pin_specs.items) |spec| {
+        placement_rules.addPinSpec(spec) catch |err| {
+            std.debug.print("sibl: error: invalid --pin spec '{s}': {s}\n", .{ spec, @errorName(err) });
+            std.process.exit(1);
+        };
+    }
+
+    if (placement_rules.regionCount() > 0 or placement_rules.ruleCount() > 0) {
+        std.debug.print("\n  Placement Rules ({d} rules, {d} regions):\n", .{
+            placement_rules.ruleCount(),
+            placement_rules.regionCount(),
+        });
+        for (placement_rules.regions.items) |region| {
+            std.debug.print("    region {s} = 0x{x}..0x{x} ({d} bytes)\n", .{
+                region.name,
+                region.address,
+                region.address + region.size,
+                region.size,
+            });
+        }
+        for (placement_rules.rules.items) |rule| {
+            switch (rule.action) {
+                .output_name => |dest| std.debug.print("    place {s} -> output {s}\n", .{ rule.pattern, dest }),
+                .region => |dest| std.debug.print("    place {s} -> region {s}\n", .{ rule.pattern, dest }),
+                .address => |addr| std.debug.print("    pin {s} @ 0x{x}\n", .{ rule.pattern, addr }),
+            }
+        }
+    }
+
     // Phase 6: Global symbol resolution
     var symtab = sibl.SymbolTable.init(arena);
     defer symtab.deinit();
@@ -145,7 +190,7 @@ pub fn main(init: std.process.Init) !void {
                 // Phase 7: feed allocatable sections into the layout
                 if (sh.isAlloc() and sh.sh_type != .null) {
                     const sec_data = sh.getData(mapped.data) catch &.{};
-                    layout.addInput(.{
+                    var input = sibl.InputSection{
                         .name = name,
                         .data = sec_data,
                         .alignment = @max(sh.addralign, 1),
@@ -155,10 +200,27 @@ pub fn main(init: std.process.Init) !void {
                         .is_nobits = sh.sh_type == .nobits,
                         .file_index = file_index,
                         .section_index = @intCast(idx),
-                    }) catch |err| {
-                        std.debug.print("sibl: error: layout failed for '{s}': {s}\n", .{ name, @errorName(err) });
+                    };
+
+                    // Phase 9.2: apply custom placement rules before ingest.
+                    // A move rule renames the section, a pin or region rule
+                    // returns the exact virtual address for its output.
+                    const placement = placement_rules.apply(&input) catch |err| {
+                        std.debug.print("sibl: error: placement rule failed for '{s}': {s}\n", .{ input.name, @errorName(err) });
                         std.process.exit(1);
                     };
+
+                    layout.addInput(input) catch |err| {
+                        std.debug.print("sibl: error: layout failed for '{s}': {s}\n", .{ input.name, @errorName(err) });
+                        std.process.exit(1);
+                    };
+
+                    if (placement.address) |pin| {
+                        layout.pinOutput(sibl.canonicalizeSectionName(input.name), pin) catch |err| {
+                            std.debug.print("sibl: error: cannot pin '{s}' at 0x{x}: {s}\n", .{ input.name, pin, @errorName(err) });
+                            std.process.exit(1);
+                        };
+                    }
                 }
             }
         }

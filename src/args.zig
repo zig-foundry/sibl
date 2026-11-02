@@ -69,12 +69,25 @@ pub const Options = struct {
     lib_dirs: std.ArrayListUnmanaged([]const u8) = .empty,
     /// List of library names to link (-l<name>)
     libs: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Raw placement spec strings (--place PATTERN=DEST, Phase 9.2): move
+    /// matching sections into an output section, or a region when DEST
+    /// names one.
+    place_specs: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Raw pin spec strings (--pin PATTERN=ADDR, Phase 9.2): pin the
+    /// holding output section at an exact virtual address.
+    pin_specs: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Raw region spec strings (--region NAME=ADDR:SIZE, Phase 9.2):
+    /// memory regions for embedded or custom memory maps.
+    region_specs: std.ArrayListUnmanaged([]const u8) = .empty,
 
     /// Free the ArrayLists that own the input file, library, and search-path lists.
     pub fn deinit(self: *Options, allocator: std.mem.Allocator) void {
         self.input_files.deinit(allocator);
         self.lib_dirs.deinit(allocator);
         self.libs.deinit(allocator);
+        self.place_specs.deinit(allocator);
+        self.pin_specs.deinit(allocator);
+        self.region_specs.deinit(allocator);
     }
 };
 
@@ -159,6 +172,38 @@ pub fn parse(allocator: std.mem.Allocator, raw_args: []const []const u8) ParseEr
             continue;
         }
 
+        // Placement rules (Phase 9.2): --place / --pin / --region
+        if (std.mem.eql(u8, arg, "--place")) {
+            i += 1;
+            if (i >= raw_args.len) return error.MissingValue;
+            try opts.place_specs.append(allocator, raw_args[i]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--place=")) {
+            try opts.place_specs.append(allocator, arg["--place=".len..]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--pin")) {
+            i += 1;
+            if (i >= raw_args.len) return error.MissingValue;
+            try opts.pin_specs.append(allocator, raw_args[i]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--pin=")) {
+            try opts.pin_specs.append(allocator, arg["--pin=".len..]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--region")) {
+            i += 1;
+            if (i >= raw_args.len) return error.MissingValue;
+            try opts.region_specs.append(allocator, raw_args[i]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--region=")) {
+            try opts.region_specs.append(allocator, arg["--region=".len..]);
+            continue;
+        }
+
         // Emulation flag: -m <emulation>
         if (std.mem.eql(u8, arg, "-m")) {
             i += 1;
@@ -225,6 +270,10 @@ pub fn printHelp() void {
         \\  -s, --strip-all       Omit all symbol tables from output
         \\  -S, --strip-debug     Omit debug sections from output
         \\  --format <fmt>        Set format explicitly: auto, elf, coff, macho
+        \\  --region N=A:Z        Define memory region NAME=ADDR:SIZE (Phase 9.2)
+        \\  --place P=D           Place section PATTERN into DEST: an output
+        \\                        section name, or a region defined earlier
+        \\  --pin S=A             Pin the section's output at ADDR (embedded maps)
         \\  -h, --help            Show this help text
         \\
     ;
@@ -379,4 +428,39 @@ test "error on invalid target format and invalid emulation" {
         "main.o",
     };
     try std.testing.expectError(error.InvalidEmulation, parse(std.testing.allocator, &bad_emu_argv));
+}
+
+test "parse placement rule flags in both argument forms" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "--region",
+        "FLASH=0x08000000:0x10000",
+        "--place",
+        ".isr*=FLASH",
+        "--place=.hot=.fast_text",
+        "--pin",
+        ".isr_hash=0x08000000",
+        "--pin=.reset=4096",
+        "main.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), opts.region_specs.items.len);
+    try std.testing.expectEqualStrings("FLASH=0x08000000:0x10000", opts.region_specs.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), opts.place_specs.items.len);
+    try std.testing.expectEqualStrings(".isr*=FLASH", opts.place_specs.items[0]);
+    try std.testing.expectEqualStrings(".hot=.fast_text", opts.place_specs.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), opts.pin_specs.items.len);
+    try std.testing.expectEqualStrings(".isr_hash=0x08000000", opts.pin_specs.items[0]);
+    try std.testing.expectEqualStrings(".reset=4096", opts.pin_specs.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), opts.input_files.items.len);
+}
+
+test "missing value for placement flags" {
+    for ([_][]const u8{ "--place", "--pin", "--region" }) |flag| {
+        const test_argv = [_][]const u8{ "sibl", flag };
+        try std.testing.expectError(error.MissingValue, parse(std.testing.allocator, &test_argv));
+    }
 }

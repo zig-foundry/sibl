@@ -134,6 +134,9 @@ pub const SizeReport = struct {
 pub const Error = error{
     OutOfMemory,
     EmptyName,
+    /// `pinOutput` was called twice on the same output section with
+    /// different addresses (Phase 9.2).
+    PinConflict,
 };
 
 /// Layout engine that groups input sections and assigns addresses.
@@ -145,6 +148,9 @@ pub const Layout = struct {
     base_address: u64,
     /// Target page size used for protection-boundary alignment.
     page_size: u64,
+    /// Virtual-address pins set by placement rules (Phase 9.2).
+    /// Key: canonical output section name (heap-owned). Value: pinned VA.
+    address_overrides: std.StringHashMapUnmanaged(u64),
 
     pub fn init(allocator: std.mem.Allocator, base_address: u64, page_size: u64) Layout {
         return .{
@@ -153,6 +159,7 @@ pub const Layout = struct {
             .allocator = allocator,
             .base_address = base_address,
             .page_size = if (page_size == 0) 4096 else page_size,
+            .address_overrides = .empty,
         };
     }
 
@@ -165,6 +172,11 @@ pub const Layout = struct {
             seg.deinit(self.allocator);
         }
         self.segments.deinit(self.allocator);
+        var pit = self.address_overrides.iterator();
+        while (pit.next()) |pin_entry| {
+            self.allocator.free(pin_entry.key_ptr.*);
+        }
+        self.address_overrides.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -222,6 +234,23 @@ pub const Layout = struct {
         });
     }
 
+    /// Pin an output section at an exact virtual address (Phase 9.2).
+    ///
+    /// `out_name` is the canonical output section name. `computeAddresses`
+    /// then places the section at `address` (aligned up to the section's
+    /// own alignment) and continues assigning following sections from the
+    /// pinned end. Calling `pinOutput` twice on the same section with a
+    /// different address is `error.PinConflict`; the same address is fine.
+    pub fn pinOutput(self: *Layout, out_name: []const u8, address: u64) Error!void {
+        const gop = try self.address_overrides.getOrPut(self.allocator, out_name);
+        if (gop.found_existing) {
+            if (gop.value_ptr.* != address) return error.PinConflict;
+        } else {
+            gop.key_ptr.* = try self.allocator.dupe(u8, out_name);
+        }
+        gop.value_ptr.* = address;
+    }
+
     /// Assign virtual addresses and file offsets to all output sections.
     ///
     /// Rules (Phase 7.2):
@@ -258,7 +287,15 @@ pub const Layout = struct {
                 }
             }
 
-            if (out.is_alloc) {
+            if (self.address_overrides.get(out.name)) |pin| {
+                // Pinned section (Phase 9.2): place it exactly where the
+                // rule asked (respecting alignment) and continue from its end.
+                const pinned_va = alignTo(pin, align_req);
+                out.virtual_address = pinned_va;
+                if (out.is_alloc) {
+                    va = pinned_va + out.size;
+                }
+            } else if (out.is_alloc) {
                 va = alignTo(va, align_req);
                 out.virtual_address = va;
                 va += out.size;
@@ -1160,4 +1197,67 @@ test "accountSizes virtual_end covers all segments" {
         if (end > max_end) max_end = end;
     }
     try std.testing.expectEqual(max_end, report.virtual_end);
+}
+
+// === Phase 9.2 tests ===
+
+test "pinOutput places a section at an exact address" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "AAAA", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".data", .data = "BBB", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.pinOutput(".data", 0x20000000);
+    layout.computeAddresses();
+
+    try std.testing.expectEqual(@as(u64, 0x400000), layout.get(".text").?.virtual_address);
+    try std.testing.expectEqual(@as(u64, 0x20000000), layout.get(".data").?.virtual_address);
+}
+
+test "computeAddresses continues from a pinned section's end" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "AAAA", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".data", .data = "BBB", .alignment = 1, .is_alloc = true, .is_writable = true, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.addInput(.{ .name = ".rodata", .data = "C", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.pinOutput(".data", 0x20000000);
+    layout.computeAddresses();
+
+    // .data pinned at 0x20000000, size 3. The next section crosses a write
+    // protection boundary and lands on the next page.
+    try std.testing.expectEqual(@as(u64, 0x20001000), layout.get(".rodata").?.virtual_address);
+}
+
+test "pinOutput respects the section's own alignment" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".vector", .data = "1234", .alignment = 4, .is_alloc = true, .is_writable = false, .is_executable = false, .is_nobits = false, .file_index = 0 });
+    try layout.pinOutput(".vector", 0x1001);
+    layout.computeAddresses();
+
+    // 0x1001 rounded up to the section's 4-byte alignment.
+    try std.testing.expectEqual(@as(u64, 0x1004), layout.get(".vector").?.virtual_address);
+}
+
+test "pinOutput rejects conflicting addresses but allows repeats" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.pinOutput(".text", 0x1000);
+    // Same address again: fine.
+    try layout.pinOutput(".text", 0x1000);
+    // Different address: conflict.
+    const result = layout.pinOutput(".text", 0x2000);
+    try std.testing.expectError(error.PinConflict, result);
+}
+
+test "unpinned sections keep the normal base-address flow" {
+    var layout = Layout.init(std.testing.allocator, 0x400000, 4096);
+    defer layout.deinit();
+
+    try layout.addInput(.{ .name = ".text", .data = "A", .alignment = 1, .is_alloc = true, .is_writable = false, .is_executable = true, .is_nobits = false, .file_index = 0 });
+    layout.computeAddresses();
+    try std.testing.expectEqual(@as(u64, 0x400000), layout.get(".text").?.virtual_address);
 }

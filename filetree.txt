@@ -21,6 +21,8 @@ sibl/
     ├── macho.zig
     ├── main.zig
     ├── reloc.zig
+    ├── entry.zig
+    ├── section_rules.zig
     ├── root.zig
     ├── strtab.zig
     ├── symbol.zig

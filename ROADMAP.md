@@ -58,7 +58,7 @@ A fast, lightweight, and zero-dependency static and dynamic linker written in Zi
 
 ## Phase 9: Linker Script and Entry Rules
 - [x] **9.1 Entry Point Setup:** Find and set the program entry point (like `_start` or `mainCRTStartup`).
-- [ ] **9.2 Custom Section Rules:** Support basic placement rules for embedded or custom memory maps.
+- [x] **9.2 Custom Section Rules:** Support basic placement rules for embedded or custom memory maps.
 - [ ] **9.3 Symbol Assignment:** Allow defining basic symbols from CLI flags (like `--defsym`).
 - [ ] **9.4 Default Layout Templates:** Provide built-in standard layouts for Linux, Windows, macOS, and bare-metal targets.
 

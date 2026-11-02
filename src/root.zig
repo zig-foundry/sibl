@@ -94,6 +94,12 @@ pub const reloc = @import("reloc.zig");
 /// computes its final virtual address from the symbol table and layout.
 pub const entry = @import("entry.zig");
 
+/// Custom section placement rules (Phase 9.2).
+/// Supports `--place` (move sections into an output section or memory
+/// region), `--pin` (exact virtual addresses), and `--region` (named
+/// memory areas for embedded maps).
+pub const rules = @import("section_rules.zig");
+
 // === Re-exported Types and Functions ===
 
 // Allocator types
@@ -354,6 +360,22 @@ pub const resolveEntryCandidates = entry.resolveCandidates;
 /// Compute the final virtual address of a defined symbol.
 pub const entrySymbolAddress = entry.symbolAddress;
 
+// Section rule types (Phase 9.2)
+/// One placement rule (pattern + action).
+pub const SectionRule = rules.Rule;
+/// What a matching rule does with an input section.
+pub const SectionRuleAction = rules.Action;
+/// A named memory region with an allocation cursor.
+pub const MemoryRegion = rules.MemoryRegion;
+/// Collection of placement rules and memory regions.
+pub const RuleSet = rules.RuleSet;
+/// Result of applying the rules to one input section.
+pub const Placement = rules.Placement;
+/// Errors from the section rule engine.
+pub const RuleSetError = rules.Error;
+/// Test an input section name against a rule pattern.
+pub const sectionRuleMatches = rules.matches;
+
 // === Test Suite Runner ===
 
 test {
@@ -370,4 +392,5 @@ test {
     _ = layout;
     _ = reloc;
     _ = entry;
+    _ = rules;
 }

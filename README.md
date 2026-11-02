@@ -19,6 +19,7 @@ sibl parses ELF, PE/COFF, Mach-O, and static archives with a zero-copy design, r
 - Relocation engine for x86_64 and AArch64 (absolute, PC-relative, ADRP, branch)
 - Range checking and in-place patching
 - Entry point resolution: `-e` / `--entry` (default `_start`) resolved to a final virtual address
+- Custom section placement rules: `--place`, `--pin`, and named `--region` memory areas for embedded maps
 - Unit-tested parsing, resolution, layout, relocation, and entry resolution
 
 ## Building
@@ -51,6 +52,30 @@ Expected output includes resolved symbols, a section layout (virtual addresses f
 ```
 
 Override the entry symbol with `-e <name>` / `--entry <name>`.
+
+### Placement Rules (Phase 9.2)
+
+For embedded or custom memory maps:
+
+```sh
+# Sections land higher if they match a rule pattern.
+# Patterns: exact name, prefix + `*`, or a single `*` catch-all.
+
+# Define memory regions (NAME=ADDR:SIZE)
+sibl --region FLASH=0x08000000:0x10000 \
+     --region RAM=0x20000000:0x8000 \
+     --place .isr*=FLASH \       # allocate matching sections in FLASH
+     --place .hot=.fast_text \   # merge .hot.* sections under .fast_text
+     --pin .vector=0x08000040 \  # pin the holding section at an exact VA
+     crt.o main.o driver.o
+```
+
+- `--place PATTERN=DEST` merges matching inputs into the output section
+  `DEST`, or allocates them inside `DEST` when it names a region defined
+  earlier. First matching rule wins, so put catch-all `*` rules last.
+- `--pin PATTERN=ADDR` fixes the holding output section's virtual address.
+- `--region NAME=ADDR:SIZE` defines a region; assigned sections allocate
+  sequentially with alignment until the region runs out (`RegionFull`).
 
 ## Using sibl as a Library
 
@@ -94,6 +119,7 @@ src/
 ├── layout.zig    Phase 7    — section grouping, segments, size accounting
 ├── reloc.zig     Phase 8    — relocation engine (x86_64, AArch64)
 ├── entry.zig     Phase 9.1  — entry point resolution
+├── section_rules.zig Phase 9.2 — placement rules and memory regions
 ├── root.zig      Public re-exports
 └── main.zig      Linker executable entry point
 ```
@@ -111,6 +137,7 @@ See `ROADMAP.md` for the full phase plan and what is still ahead.
 
 ## Status
 
-Phases 1–8 and Phase 9.1 (entry point setup) are implemented and tested.
-Phase 9 continues with section placement rules and `--defsym` support. Binary
+Phases 1–8, Phase 9.1 (entry point setup), and Phase 9.2 (custom section
+placement rules) are implemented and tested. Phase 9 continues with
+`--defsym` support (9.3) and default layout templates (9.4). Binary
 emission of a runnable binary is Phase 13.
