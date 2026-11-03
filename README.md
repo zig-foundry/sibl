@@ -20,7 +20,9 @@ sibl parses ELF, PE/COFF, Mach-O, and static archives with a zero-copy design, r
 - Range checking and in-place patching
 - Entry point resolution: `-e` / `--entry` (default `_start`) resolved to a final virtual address
 - Custom section placement rules: `--place`, `--pin`, and named `--region` memory areas for embedded maps
-- Unit-tested parsing, resolution, layout, relocation, and entry resolution
+- Symbol assignment: `--defsym SYMBOL=EXPRESSION` defines absolute symbols (constants, existing symbols, and `+`/`-`)
+- Default layout templates for Linux ELF, Windows PE, macOS Mach-O, and bare-metal (base address, page size, boundary symbols)
+- Unit-tested parsing, resolution, layout, relocation, entry resolution, placement rules, defsym, and templates
 
 ## Building
 
@@ -77,6 +79,40 @@ sibl --region FLASH=0x08000000:0x10000 \
 - `--region NAME=ADDR:SIZE` defines a region; assigned sections allocate
   sequentially with alignment until the region runs out (`RegionFull`).
 
+### Symbol Assignment (Phase 9.3)
+
+Define absolute symbols from the command line after input symbols are
+collected. Expressions follow the limited arithmetic of GNU ld's
+`--defsym` (no whitespace):
+
+```sh
+# Hex or decimal constant
+sibl --defsym=VERSION=0x100 --defsym BUILD=4096 main.o
+
+# Reference an existing symbol, with + / -
+sibl --defsym=ENTRY=main+0x10 --defsym=LIMIT=ENTRY-4 main.o
+```
+
+A second strong definition of the same name is an error. Later specs in
+the same command may reference symbols defined by earlier specs.
+
+### Default Layout Templates (Phase 9.4)
+
+When no custom base is pinned, sibl applies a built-in template:
+
+| Target        | Base address   | Default entry     | Output |
+|---------------|----------------|-------------------|--------|
+| Linux ELF     | `0x400000`     | `_start`          | a.out  |
+| Windows PE 64 | `0x140000000`  | `mainCRTStartup`  | a.exe  |
+| Windows PE 32 | `0x400000`     | `mainCRTStartup`  | a.exe  |
+| macOS Mach-O  | `0x100000000`  | `_main`           | a.out  |
+| bare-metal    | `0`            | `_start`          | a.out  |
+
+Bare-metal is selected when any `--region` rule is present. After address
+assignment the template provides `etext` / `_etext`, `edata` / `_edata`,
+`__bss_start`, `end` / `_end`, and `__executable_start` as absolute
+symbols, only if the name is not already defined.
+
 ## Using sibl as a Library
 
 Import the root module:
@@ -120,6 +156,8 @@ src/
 ├── reloc.zig     Phase 8    — relocation engine (x86_64, AArch64)
 ├── entry.zig     Phase 9.1  — entry point resolution
 ├── section_rules.zig Phase 9.2 — placement rules and memory regions
+├── defsym.zig    Phase 9.3  — --defsym symbol assignment
+├── templates.zig Phase 9.4  — default layout templates
 ├── root.zig      Public re-exports
 └── main.zig      Linker executable entry point
 ```
@@ -137,7 +175,6 @@ See `ROADMAP.md` for the full phase plan and what is still ahead.
 
 ## Status
 
-Phases 1–8, Phase 9.1 (entry point setup), and Phase 9.2 (custom section
-placement rules) are implemented and tested. Phase 9 continues with
-`--defsym` support (9.3) and default layout templates (9.4). Binary
-emission of a runnable binary is Phase 13.
+Phases 1–8 and Phase 9 (entry point setup, custom section placement
+rules, `--defsym` symbol assignment, and default layout templates) are
+implemented and tested. Binary emission of a runnable binary is Phase 13.

@@ -22,6 +22,8 @@
 //! - Phase 6: Global symbol resolution (binding, duplicates, undefined, visibility)
 //! - Phase 7: Section grouping, address layout, segment memory map, size accounting
 //! - Phase 8: Relocation engine (x86_64 and AArch64, range checks, in-place patch)
+//! - Phase 9: Entry point resolution, custom section placement rules,
+//!   `--defsym` symbol assignment, and default layout templates
 //!
 //! Consumers typically start with `SymbolTable`, `Layout`, and `reloc.apply`.
 //! See README.md for a short usage example and ROADMAP.md for remaining work.
@@ -99,6 +101,15 @@ pub const entry = @import("entry.zig");
 /// region), `--pin` (exact virtual addresses), and `--region` (named
 /// memory areas for embedded maps).
 pub const rules = @import("section_rules.zig");
+
+/// Symbol assignment from CLI flags (Phase 9.3).
+/// Parses `--defsym SYMBOL=EXPRESSION` and inserts absolute symbols.
+pub const defsym = @import("defsym.zig");
+
+/// Default layout templates (Phase 9.4).
+/// Built-in base addresses, page sizes, and boundary symbols for Linux
+/// ELF, Windows PE, macOS Mach-O, and bare-metal targets.
+pub const templates = @import("templates.zig");
 
 // === Re-exported Types and Functions ===
 
@@ -376,6 +387,36 @@ pub const RuleSetError = rules.Error;
 /// Test an input section name against a rule pattern.
 pub const sectionRuleMatches = rules.matches;
 
+// Symbol assignment types (Phase 9.3)
+/// A parsed `--defsym` specification.
+pub const DefsymSpec = defsym.Spec;
+/// Errors from `--defsym` parsing and evaluation.
+pub const DefsymError = defsym.Error;
+/// Split a raw `--defsym` argument into a name and an expression.
+pub const parseDefsymSpec = defsym.parseSpec;
+/// Evaluate a limited `--defsym` expression against a symbol table.
+pub const evaluateDefsym = defsym.evaluate;
+/// Apply a list of `--defsym` specs to a symbol table.
+pub const applyDefsyms = defsym.apply;
+
+// Default layout template types (Phase 9.4)
+/// Built-in layout template kind.
+pub const TemplateKind = templates.Kind;
+/// A complete default layout description.
+pub const Template = templates.Template;
+/// Build the template that matches a resolved target.
+pub const templateForTarget = templates.forTarget;
+/// Apply a template's base address and page size to a layout.
+pub const applyTemplateBase = templates.applyBase;
+/// Define standard boundary symbols after address assignment.
+pub const provideBoundarySymbols = templates.provideBoundarySymbols;
+/// Virtual address of the first byte of a named output section.
+pub const sectionStart = templates.sectionStart;
+/// Virtual address one past the last byte of a named output section.
+pub const sectionEnd = templates.sectionEnd;
+/// Highest allocated virtual address in the layout.
+pub const imageEnd = templates.imageEnd;
+
 // === Test Suite Runner ===
 
 test {
@@ -393,4 +434,6 @@ test {
     _ = reloc;
     _ = entry;
     _ = rules;
+    _ = defsym;
+    _ = templates;
 }

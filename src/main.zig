@@ -2,9 +2,11 @@
 //!
 //! Uses Zig 0.17 juicy main (`std.process.Init`). Reads command-line arguments,
 //! detects the target, maps input files, resolves symbols (Phase 6), groups
-//! sections and builds segments (Phase 7), reports the layout, and resolves
-//! the program entry point (Phase 9.1). Relocation application (Phase 8) is
-//! available as a library; binary emission is later.
+//! sections and builds segments (Phase 7), applies custom placement rules
+//! (Phase 9.2), assigns absolute symbols from `--defsym` (Phase 9.3),
+//! applies the default layout template for the target (Phase 9.4), and
+//! resolves the program entry point (Phase 9.1). Relocation application
+//! (Phase 8) is available as a library; binary emission is later.
 
 const std = @import("std");
 const sibl = @import("sibl");
@@ -43,6 +45,11 @@ pub fn main(init: std.process.Init) !void {
     // Phase 1.4: Detect target architecture and binary format
     const target_info = sibl.TargetInfo.detect(options);
 
+    // Phase 9.4: pick the default layout template. A `--region` rule means
+    // the user is building an embedded / bare-metal image.
+    const bare_metal = options.region_specs.items.len > 0;
+    const layout_template = sibl.templateForTarget(target_info, bare_metal);
+
     const final_output = if (std.mem.eql(u8, options.output_path, "a.out") and target_info.format == .coff)
         target_info.default_output
     else
@@ -61,6 +68,11 @@ pub fn main(init: std.process.Init) !void {
         @tagName(target_info.endian),
     });
     std.debug.print("  Binary Format : {s}\n", .{@tagName(target_info.format)});
+    std.debug.print("  Layout Template: {s} (base=0x{x}, page={d})\n", .{
+        layout_template.kind.name(),
+        layout_template.base_address,
+        layout_template.page_size,
+    });
     std.debug.print("  Page Size     : {d} bytes\n", .{target_info.page_size});
     std.debug.print("  Output File   : {s}\n", .{final_output});
     std.debug.print("  Entry Point   : {s}\n", .{final_entry});
@@ -118,9 +130,11 @@ pub fn main(init: std.process.Init) !void {
     var symtab = sibl.SymbolTable.init(arena);
     defer symtab.deinit();
 
-    // Phase 7: Section grouping and address layout
-    var layout = sibl.Layout.init(arena, 0x400000, target_info.page_size);
+    // Phase 7 + 9.4: Section grouping and address layout. The template
+    // supplies the default base address and page size.
+    var layout = sibl.Layout.init(arena, layout_template.base_address, layout_template.page_size);
     defer layout.deinit();
+    sibl.applyTemplateBase(&layout, layout_template);
 
     var file_index: u32 = 0;
     for (options.input_files.items) |file_path| {
@@ -534,6 +548,19 @@ pub fn main(init: std.process.Init) !void {
         file_index += 1;
     }
 
+    // Phase 9.3: apply --defsym absolute symbols now that input symbols
+    // have been collected. Later specs may reference earlier ones.
+    if (options.defsym_specs.items.len > 0) {
+        std.debug.print("\n  Symbol Assignments ({d}):\n", .{options.defsym_specs.items.len});
+        for (options.defsym_specs.items) |spec| {
+            std.debug.print("    --defsym {s}\n", .{spec});
+        }
+        sibl.applyDefsyms(&symtab, options.defsym_specs.items) catch |err| {
+            std.debug.print("sibl: error: --defsym failed: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+    }
+
     // Phase 6: print resolved symbol table
     std.debug.print("\n  Resolved Symbols ({d} total, {d} undefined, {d} exportable):\n", .{
         symtab.count(),
@@ -562,6 +589,27 @@ pub fn main(init: std.process.Init) !void {
 
     // Phase 7: compute and print section layout
     layout.computeAddresses();
+
+    // Phase 9.4: provide standard boundary symbols (etext, end, ...) if
+    // the user or an input object did not already define them.
+    sibl.provideBoundarySymbols(&symtab, &layout, layout_template) catch |err| {
+        std.debug.print("sibl: error: failed to provide boundary symbols: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    std.debug.print("  Boundary Symbols:\n", .{});
+    const boundary_names = [_][]const u8{
+        "__executable_start", "etext", "_etext", "edata", "_edata",
+        "__bss_start",        "end",   "_end",
+    };
+    for (boundary_names) |bname| {
+        if (symtab.get(bname)) |bsym| {
+            if (bsym.kind == .absolute) {
+                std.debug.print("    {s:<22} = 0x{x}\n", .{ bname, bsym.value });
+            }
+        }
+    }
+
     std.debug.print("\n  Section Layout ({d} output sections, virtual=0x{x}, file=0x{x}):\n", .{
         layout.count(),
         layout.virtualSize(),

@@ -79,6 +79,10 @@ pub const Options = struct {
     /// Raw region spec strings (--region NAME=ADDR:SIZE, Phase 9.2):
     /// memory regions for embedded or custom memory maps.
     region_specs: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Raw `--defsym SYMBOL=EXPRESSION` specs (Phase 9.3). Expressions are
+    /// evaluated after input symbols are collected and inserted as absolute
+    /// symbols. See `defsym.zig`.
+    defsym_specs: std.ArrayListUnmanaged([]const u8) = .empty,
 
     /// Free the ArrayLists that own the input file, library, and search-path lists.
     pub fn deinit(self: *Options, allocator: std.mem.Allocator) void {
@@ -88,6 +92,7 @@ pub const Options = struct {
         self.place_specs.deinit(allocator);
         self.pin_specs.deinit(allocator);
         self.region_specs.deinit(allocator);
+        self.defsym_specs.deinit(allocator);
     }
 };
 
@@ -204,6 +209,18 @@ pub fn parse(allocator: std.mem.Allocator, raw_args: []const []const u8) ParseEr
             continue;
         }
 
+        // Symbol assignment (Phase 9.3): --defsym SYMBOL=EXPRESSION
+        if (std.mem.eql(u8, arg, "--defsym")) {
+            i += 1;
+            if (i >= raw_args.len) return error.MissingValue;
+            try opts.defsym_specs.append(allocator, raw_args[i]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--defsym=")) {
+            try opts.defsym_specs.append(allocator, arg["--defsym=".len..]);
+            continue;
+        }
+
         // Emulation flag: -m <emulation>
         if (std.mem.eql(u8, arg, "-m")) {
             i += 1;
@@ -274,6 +291,9 @@ pub fn printHelp() void {
         \\  --place P=D           Place section PATTERN into DEST: an output
         \\                        section name, or a region defined earlier
         \\  --pin S=A             Pin the section's output at ADDR (embedded maps)
+        \\  --defsym SYM=EXPR     Define an absolute symbol (Phase 9.3). EXPR is a
+        \\                        constant (0x.. / decimal), an existing symbol,
+        \\                        or a + / - combination of those (no spaces)
         \\  -h, --help            Show this help text
         \\
     ;
@@ -459,8 +479,28 @@ test "parse placement rule flags in both argument forms" {
 }
 
 test "missing value for placement flags" {
-    for ([_][]const u8{ "--place", "--pin", "--region" }) |flag| {
+    for ([_][]const u8{ "--place", "--pin", "--region", "--defsym" }) |flag| {
         const test_argv = [_][]const u8{ "sibl", flag };
         try std.testing.expectError(error.MissingValue, parse(std.testing.allocator, &test_argv));
     }
+}
+
+test "parse --defsym in both argument forms" {
+    const test_argv = [_][]const u8{
+        "sibl",
+        "--defsym",
+        "FOO=0x1000",
+        "--defsym=BAR=main+0x10",
+        "--defsym=ZERO=0",
+        "main.o",
+    };
+
+    var opts = try parse(std.testing.allocator, &test_argv);
+    defer opts.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), opts.defsym_specs.items.len);
+    try std.testing.expectEqualStrings("FOO=0x1000", opts.defsym_specs.items[0]);
+    try std.testing.expectEqualStrings("BAR=main+0x10", opts.defsym_specs.items[1]);
+    try std.testing.expectEqualStrings("ZERO=0", opts.defsym_specs.items[2]);
+    try std.testing.expectEqual(@as(usize, 1), opts.input_files.items.len);
 }

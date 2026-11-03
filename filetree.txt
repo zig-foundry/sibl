@@ -14,6 +14,7 @@ sibl/
     ├── archive.zig
     ├── args.zig
     ├── coff.zig
+    ├── defsym.zig
     ├── elf.zig
     ├── entry.zig
     ├── file.zig
@@ -21,9 +22,9 @@ sibl/
     ├── macho.zig
     ├── main.zig
     ├── reloc.zig
-    ├── entry.zig
-    ├── section_rules.zig
     ├── root.zig
+    ├── section_rules.zig
     ├── strtab.zig
     ├── symbol.zig
-    └── target.zig
+    ├── target.zig
+    └── templates.zig
